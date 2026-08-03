@@ -1,0 +1,127 @@
+{
+  "hemoglobin": {
+    "unit": "g/dL",
+    "ranges": {
+      "adult_male":   { "min": 13.0, "max": 17.0 },
+      "adult_female": { "min": 12.0, "max": 15.0 },
+      "child":        { "min": 11.0, "max": 16.0 },
+      "elderly":      { "min": 11.5, "max": 16.5 }
+    },
+    "critical_low": 7.0,
+    "critical_high": 20.0,
+    "source": "ICMR NIN 2020"
+  },
+  "glucose_fasting": {
+    "unit": "mg/dL",
+    "ranges": {
+      "normal":    { "min": 70,  "max": 100 },
+      "prediabetes": { "min": 100, "max": 125 },
+      "diabetes":  { "min": 126, "max": 999 }
+    },
+    "critical_low": 50,
+    "critical_high": 500,
+    "source": "ICMR Diabetes Guidelines 2018"
+  },
+  "glucose_postprandial": {
+    "unit": "mg/dL",
+    "ranges": {
+      "normal":    { "min": 70,  "max": 140 },
+      "prediabetes": { "min": 140, "max": 199 },
+      "diabetes":  { "min": 200, "max": 999 }
+    },
+    "critical_low": 50,
+    "critical_high": 600,
+    "source": "ICMR Diabetes Guidelines 2018"
+  },
+  "creatinine": {
+    "unit": "mg/dL",
+    "ranges": {
+      "adult_male":   { "min": 0.7, "max": 1.2 },
+      "adult_female": { "min": 0.5, "max": 1.0 },
+      "child":        { "min": 0.3, "max": 0.7 }
+    },
+    "critical_high": 10.0,
+    "source": "ICMR Renal Guidelines"
+  },
+  "wbc": {
+    "unit": "cells/mcL",
+    "ranges": {
+      "default": { "min": 4000, "max": 11000 }
+    },
+    "critical_low": 2000,
+    "critical_high": 30000,
+    "source": "ICMR NIN 2020"
+  },
+  "platelets": {
+    "unit": "cells/mcL",
+    "ranges": {
+      "default": { "min": 150000, "max": 400000 }
+    },
+    "critical_low": 50000,
+    "critical_high": 1000000,
+    "source": "ICMR NIN 2020"
+  },
+  "sodium": {
+    "unit": "mEq/L",
+    "ranges": {
+      "default": { "min": 135, "max": 145 }
+    },
+    "critical_low": 120,
+    "critical_high": 160,
+    "source": "ICMR Clinical Biochemistry"
+  },
+  "potassium": {
+    "unit": "mEq/L",
+    "ranges": {
+      "default": { "min": 3.5, "max": 5.0 }
+    },
+    "critical_low": 2.5,
+    "critical_high": 6.5,
+    "source": "ICMR Clinical Biochemistry"
+  },
+  "total_bilirubin": {
+    "unit": "mg/dL",
+    "ranges": {
+      "default": { "min": 0.2, "max": 1.2 }
+    },
+    "critical_high": 15.0,
+    "source": "ICMR Hepatology Guidelines"
+  },
+  "alt": {
+    "unit": "U/L",
+    "ranges": {
+      "adult_male":   { "min": 7, "max": 40 },
+      "adult_female": { "min": 7, "max": 35 }
+    },
+    "critical_high": 1000,
+    "source": "ICMR Hepatology Guidelines"
+  },
+  "ast": {
+    "unit": "U/L",
+    "ranges": {
+      "adult_male":   { "min": 10, "max": 40 },
+      "adult_female": { "min": 10, "max": 35 }
+    },
+    "critical_high": 1000,
+    "source": "ICMR Hepatology Guidelines"
+  },
+  "tsh": {
+    "unit": "mIU/L",
+    "ranges": {
+      "default": { "min": 0.4, "max": 4.0 }
+    },
+    "critical_low": 0.01,
+    "critical_high": 10.0,
+    "source": "ICMR Endocrinology Guidelines"
+  },
+  "hba1c": {
+    "unit": "%",
+    "ranges": {
+      "normal":      { "min": 0,   "max": 5.7 },
+      "prediabetes": { "min": 5.7, "max": 6.4 },
+      "diabetes":    { "min": 6.5, "max": 99  }
+    },
+    "critical_high": 14.0,
+    "source": "ICMR Diabetes Guidelines 2018"
+  }
+}
