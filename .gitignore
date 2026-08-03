@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+med/
+.env
+backend/data/
+
+# Node
+node_modules/
+dist/
+.angular/
+
+# Docker
+postgres_data/
+
+# Model files
+*.gguf
