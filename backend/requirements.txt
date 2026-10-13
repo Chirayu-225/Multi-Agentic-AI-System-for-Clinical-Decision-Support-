@@ -3,7 +3,7 @@
 # API & framework
 fastapi==0.111.0
 uvicorn==0.30.1
-python-multipart==0.0.31
+python-multipart==0.0.32
 websockets==12.0
 
 # Gemini
