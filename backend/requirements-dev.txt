@@ -10,7 +10,7 @@ python-dotenv==1.2.2
 PyJWT==2.15.1
 pydantic==2.7.4
 numpy==1.26.4
-pymupdf==1.24.1
+pymupdf==1.28.2
 reportlab==4.4.2
 pytest==8.2.2
 bandit==1.7.9
