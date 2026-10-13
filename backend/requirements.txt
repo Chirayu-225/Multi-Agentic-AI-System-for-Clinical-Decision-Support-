@@ -26,7 +26,7 @@ indic-transliteration==2.3.57
 
 # NER
 gliner==0.2.9
-transformers==4.41.0
+transformers==5.19.0
 torch==2.3.0
 
 # Auth
