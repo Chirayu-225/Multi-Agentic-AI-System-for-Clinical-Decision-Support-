@@ -12,6 +12,6 @@ pydantic==2.7.4
 numpy==1.26.4
 pymupdf==1.24.1
 reportlab==4.4.2
-pytest==8.2.2
+pytest==9.1.1
 bandit==1.7.9
 pip-audit==2.7.3
