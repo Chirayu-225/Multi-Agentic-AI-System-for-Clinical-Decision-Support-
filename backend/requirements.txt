@@ -19,7 +19,7 @@ chromadb==0.5.0
 sentence-transformers==3.0.1
 
 # Document processing
-pymupdf==1.24.1
+pymupdf==1.28.2
 easyocr==1.7.1
 langdetect==1.0.9
 indic-transliteration==2.3.57
