@@ -2,7 +2,7 @@
 # ML stack (torch, GLiNER, EasyOCR, ChromaDB): tests/conftest.py stubs those modules,
 # so CI stays fast and doesn't need GPU wheels.
 fastapi==0.111.0
-uvicorn==0.30.1
+uvicorn==0.54.0
 python-multipart==0.0.31
 sqlalchemy==2.0.30
 httpx==0.27.0

@@ -2,7 +2,7 @@
 # aiohttp 3.9.5 alone carried 68 known advisories (found by pip-audit, see SECURITY.md).
 # API & framework
 fastapi==0.111.0
-uvicorn==0.30.1
+uvicorn==0.54.0
 python-multipart==0.0.31
 websockets==12.0
 
