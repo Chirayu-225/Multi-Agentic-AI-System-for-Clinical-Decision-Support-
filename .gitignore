@@ -4,7 +4,16 @@ __pycache__/
 venv/
 med/
 .env
+.env.*
+!.env.example
 backend/data/
+
+# Databases — never commit runtime data (contains patient report content)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+backend/medsight.db
 
 # Node
 node_modules/
@@ -16,3 +25,8 @@ postgres_data/
 
 # Model files
 *.gguf
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

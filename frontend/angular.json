@@ -3,7 +3,7 @@
   "version": 1,
   "newProjectRoot": "projects",
   "projects": {
-    "medsight-frontend": {
+    "agentic-medical-assistant": {
       "projectType": "application",
       "root": "",
       "sourceRoot": "src",
@@ -11,7 +11,7 @@
         "build": {
           "builder": "@angular-devkit/build-angular:application",
           "options": {
-            "outputPath": "dist/medsight-frontend",
+            "outputPath": "dist/agentic-medical-assistant",
             "index": "src/index.html",
             "browser": "src/main.ts",
             "polyfills": ["zone.js"],
@@ -26,7 +26,12 @@
                 { "type": "initial", "maximumWarning": "500kb", "maximumError": "1mb" },
                 { "type": "anyComponentStyle", "maximumWarning": "2kb", "maximumError": "4kb" }
               ],
-              "outputHashing": "all"
+              "outputHashing": "all",
+              "optimization": {
+                "scripts": true,
+                "styles": true,
+                "fonts": false
+              }
             },
             "development": {
               "optimization": false,
@@ -39,8 +44,8 @@
         "serve": {
           "builder": "@angular-devkit/build-angular:dev-server",
           "configurations": {
-            "production": { "buildTarget": "medsight-frontend:build:production" },
-            "development": { "buildTarget": "medsight-frontend:build:development" }
+            "production": { "buildTarget": "agentic-medical-assistant:build:production" },
+            "development": { "buildTarget": "agentic-medical-assistant:build:development" }
           },
           "defaultConfiguration": "development"
         }

@@ -1,0 +1,63 @@
+# Accepted risks for pip-audit. Every package here is justified in SECURITY.md
+# ("Dependency audit") - this file is not a place to silence noise.
+#
+# The ML stack (torch, transformers, sentence-transformers, chromadb) is pinned
+# together because GLiNER 0.2.9 and the embedding model were validated against
+# these exact versions; upgrading them needs a full re-test of extraction quality
+# on a machine with the models installed, which CI cannot do. Upgrade them as ONE
+# change, re-run `python -m eval.run_eval`, then delete the matching lines below.
+# Regenerate this list with: pip-audit -r backend/requirements.txt -f json
+# chromadb==0.5.0  (3 advisories)
+PYSEC-2026-3813
+PYSEC-2026-3814
+PYSEC-2026-3815
+# sentence-transformers==3.0.1  (1 advisories)
+PYSEC-2026-4164
+# torch==2.3.0  (20 advisories)
+PYSEC-2024-259
+PYSEC-2025-189
+PYSEC-2025-190
+PYSEC-2025-191
+PYSEC-2025-192
+PYSEC-2025-193
+PYSEC-2025-194
+PYSEC-2025-195
+PYSEC-2025-198
+PYSEC-2025-203
+PYSEC-2025-204
+PYSEC-2025-205
+PYSEC-2025-206
+PYSEC-2025-207
+PYSEC-2025-208
+PYSEC-2025-209
+PYSEC-2025-41
+PYSEC-2026-139
+PYSEC-2026-1970
+PYSEC-2026-2286
+# transformers==4.41.0  (26 advisories)
+PYSEC-2024-227
+PYSEC-2024-228
+PYSEC-2024-229
+PYSEC-2025-211
+PYSEC-2025-212
+PYSEC-2025-213
+PYSEC-2025-214
+PYSEC-2025-215
+PYSEC-2025-216
+PYSEC-2025-217
+PYSEC-2025-218
+PYSEC-2025-40
+PYSEC-2026-1977
+PYSEC-2026-1980
+PYSEC-2026-1981
+PYSEC-2026-1982
+PYSEC-2026-1983
+PYSEC-2026-1984
+PYSEC-2026-1985
+PYSEC-2026-1986
+PYSEC-2026-1987
+PYSEC-2026-1988
+PYSEC-2026-2288
+PYSEC-2026-2289
+PYSEC-2026-2290
+PYSEC-2026-3929

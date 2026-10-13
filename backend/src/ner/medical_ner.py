@@ -61,6 +61,13 @@ def _clean_lab_name(raw: str) -> str:
     """
     words = raw.lower().strip().split()
 
+    # Post-prandial glucose must be recognised BEFORE the generic "glucose" shortcut below,
+    # or it is collapsed to "glucose" and graded against the fasting range.
+    joined = " ".join(words)
+    if ("prandial" in joined or "ppbs" in words or "pp" in words or "ppg" in words) and \
+            ("glucose" in words or "sugar" in words or "ppbs" in words or "ppg" in words or "prandial" in joined):
+        return "post prandial glucose"
+
     # If a known lab test name appears anywhere in the string, extract it
     for known in KNOWN_LAB_TESTS:
         if known in words:
@@ -181,72 +188,87 @@ def extract_entities(text: str, threshold: float = 0.4) -> dict:
     return result
 
 
+# Units recognised in report text (case-insensitive).
+_UNIT_ALT = r"g/dL|mg/dL|mEq/L|U/L|mIU/L|%|cells/mcL|cells/cumm|/cumm|mmol/L|IU/L|ng/mL|pg/mL|mcg/dL|uIU/mL|µIU/mL"
+# Numbers as they appear on Indian lab reports: plain (9.2), decimal comma (9,2), and
+# thousands grouping in either Western (150,000) or lakh style (1,50,000). The grouped
+# forms are tried FIRST: otherwise "1,50,000" parsed as 1 - a silent, dangerous misread
+# (a platelet count of 1 would be graded CRITICAL).
+_NUM = r"\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:[.,]\d+)?"
+
+
+def _parse_number(raw: str) -> float:
+    """'1,50,000' -> 150000 ; '150,000' -> 150000 ; '9,2' -> 9.2 ; '9.2' -> 9.2.
+    A comma followed by exactly 1-2 digits at the end is a decimal comma; groups of 3
+    (optionally preceded by lakh-style pairs) are thousands separators."""
+    raw = raw.strip()
+    if re.fullmatch(r"\d{1,3}(?:,\d{2})*,\d{3}(?:\.\d+)?", raw) or re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", raw):
+        return float(raw.replace(",", ""))
+    if re.fullmatch(r"\d+,\d{1,2}", raw):
+        return float(raw.replace(",", "."))
+    return float(raw.replace(",", ""))
+
+# Lines that look like "Label: number" but are identifiers/demographics, not lab results. Without
+# this, MRNs, phone numbers and ages were being extracted as "lab values" (eval/run_eval.py
+# measured 25% extraction precision), shown in the UI, and flagged "no ICMR range".
+_NON_LAB_LABELS = re.compile(
+    r"\b(mrn|uhid|ip ?no|op ?no|reg(?:istration)?|bed|ward|room|phone|mobile|tel|contact|fax|pin ?code?|zip|"
+    r"aadhaar|aadhar|pan|id|age|age/sex|sex|dob|date|time|page|sample|specimen|barcode|lab no|invoice|bill|"
+    r"receipt|ref(?:erred)? ?no|accession|visit|episode|height|weight|bmi|license|licence|nabl)\b", re.I)
+
+_TABLE_RE = re.compile(
+    rf"^(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s{{2,}}(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})?(?:\s|$)", re.I)
+_COLON_RE = re.compile(
+    rf"^(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s*:\s*(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})?", re.I)
+_DASH_RE = re.compile(
+    rf"^(?P<test>[A-Za-z][A-Za-z0-9 /().%+]{{1,40}}?)\s+[-\u2013=]\s*(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})?", re.I)
+_SENTENCE_RE = re.compile(
+    rf"(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s+(?:was found to be|was measured at|was|is|of|measured|measures|came to|=)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})", re.I)
+
+
 def _extract_lab_values_regex(text: str) -> list[dict]:
     """
-    Structured lab value extraction using two approaches:
-    1. Line-by-line parser — primary method, catches "Test: value unit" format
-    2. Regex pattern — fallback for inline formats
+    Structured lab value extraction, line by line, trying four real-world layouts in order:
+      1. "Test: 9.2 g/dL"                      (colon)
+      2. "Test - 9.2 g/dL"                      (dash / equals)
+      3. "Test        9.2    g/dL   12 - 15"    (table: columns separated by 2+ spaces)
+      4. "Test was found to be 9.2 g/dL ..."    (sentence; unit required)
+    A match is kept only if it carries a recognised unit OR the test name maps to a known
+    ICMR test - this is what keeps identifiers, ages and dates out. For table rows the FIRST
+    number is the result (later numbers are the reference range).
     """
-    matches = []
-    seen_tests = set()
+    from src.flagging.risk_flagging import _canonical_name, REFERENCE_RANGES
 
-    # ── Method 1: Line-by-line parser (most reliable) ─────────────────────
+    matches, seen = [], set()
     for line in text.split("\n"):
         line = line.strip()
-        if not line or ":" not in line:
+        if not line or len(line) > 200:
+            continue
+        m = None
+        for rx in (_COLON_RE, _DASH_RE, _TABLE_RE, _SENTENCE_RE):
+            m = rx.match(line) if rx is not _SENTENCE_RE else rx.search(line)
+            if m:
+                break
+        if not m:
             continue
 
-        # Split on first colon only
-        parts = line.split(":", 1)
-        if len(parts) != 2:
+        raw_test = m.group("test").strip()
+        if _NON_LAB_LABELS.search(raw_test):
             continue
-
-        raw_test = parts[0].strip()
-        rest     = parts[1].strip()
-
-        # Extract numeric value from rest of line
-        num_match = re.search(
-            r"(\d+\.?\d*)\s*(g/dL|mg/dL|mEq/L|U/L|mIU/L|%|cells/mcL|mmol/L|IU/L|ng/mL|pg/mL)?",
-            rest
-        )
-        if not num_match:
-            continue
-
-        value = float(num_match.group(1))
-        unit  = num_match.group(2) or ""
-
-        # Clean the test name
         test = _clean_lab_name(raw_test)
-
-        # Skip noise-only names
         if not test or test in _NOISE_WORDS or len(test) < 2:
             continue
-
-        if test not in seen_tests:
-            seen_tests.add(test)
-            matches.append({"test": test, "value": value, "unit": unit.strip()})
-
-    # ── Method 2: Regex fallback for inline formats ────────────────────────
-    if not matches:
-        for m in LAB_VALUE_PATTERN.finditer(text):
-            raw_test = m.group("test").strip()
-            value    = m.group("value")
-            unit     = m.group("unit") or ""
-            test     = _clean_lab_name(raw_test)
-
-            if len(test) < 2 or not value or test in _NOISE_WORDS:
-                continue
-            if test not in seen_tests:
-                seen_tests.add(test)
-                try:
-                    matches.append({
-                        "test": test,
-                        "value": float(value),
-                        "unit": unit.strip(),
-                    })
-                except ValueError:
-                    pass
-
+        unit = (m.group("unit") or "").strip()
+        known = _canonical_name(test) in REFERENCE_RANGES
+        if not unit and not known:
+            continue
+        try:
+            value = _parse_number(m.group("value"))
+        except ValueError:
+            continue
+        if test not in seen:
+            seen.add(test)
+            matches.append({"test": test, "value": value, "unit": unit})
     return matches
 
 

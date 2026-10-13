@@ -1,0 +1,90 @@
+name: security-and-tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly: new advisories appear without code changes
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r backend/requirements-dev.txt
+      - name: Unit + adversarial tests
+        working-directory: backend
+        run: python -m pytest tests -q
+      - name: Offline evaluation harness (fails if metrics regress below thresholds)
+        working-directory: backend
+        run: python -m eval.run_eval --check
+
+  sast-bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install bandit==1.7.9
+      - name: Bandit (fail on medium+ severity)
+        run: bandit -r backend/src backend/main.py -ll
+
+  dependency-audit-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pip-audit==2.7.3
+      - name: pip-audit
+        # Known, documented exceptions live in backend/.pip-audit-ignore (one ID per
+        # line, each with a reason in SECURITY.md). Anything NEW fails the build.
+        run: |
+          IGNORES=$(grep -v '^#' backend/.pip-audit-ignore | grep -v '^$' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+          pip-audit -r backend/requirements.txt --no-deps --disable-pip $IGNORES
+
+  dependency-audit-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: npm audit (production deps, fail on critical)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=critical
+      - name: npm audit full report (informational)
+        working-directory: frontend
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+        working-directory: frontend
+      - name: Production build
+        working-directory: frontend
+        run: npx ng build --configuration production
+      - name: No unsafe HTML sinks (OWASP LLM10 - model output is only ever interpolated)
+        working-directory: frontend
+        run: |
+          if grep -rnE "innerHTML|bypassSecurityTrust|DomSanitizer|eval\(|document\.write" src/; then
+            echo "Unsafe rendering primitive found"; exit 1
+          fi
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,24 @@
+{
+  "_comment": "CI fails if any measured metric regresses past these. Only metrics that currently hold are gated; known-weak ones (deidentification.regex_only, grounding value_swap/wrong_direction, injection evasions) are reported but deliberately not gated.",
+  "min": {
+    "extraction.recall": 0.97,
+    "extraction.precision": 0.97,
+    "flagging.abnormal_recall": 0.98,
+    "flagging.critical_recall": 0.99,
+    "flagging.direction_accuracy": 0.98,
+    "flagging.canonical_mapping_accuracy": 0.99,
+    "injection.attack_detection_rate": 1.0,
+    "grounding.catch_rate_by_corruption.novel_value": 0.95,
+    "grounding.catch_rate_by_corruption.fabricated_lab": 0.99,
+    "interactions.brand_resolution_accuracy": 1.0,
+    "interactions.rule_self_consistency": 1.0
+  },
+  "max": {
+    "flagging.false_alarm_rate_on_normal": 0.01,
+    "deidentification.oracle_entities.cases_with_any_leak": 0.0,
+    "deidentification.regex_only.cases_with_any_leak": 0.25,
+    "injection.benign_false_positive_rate": 0.0,
+    "injection.synthetic_report_false_positive_rate": 0.0,
+    "grounding.clean_summary_false_positive_rate": 0.02
+  }
+}

@@ -1,0 +1,73 @@
+version: "3.9"
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: agentic-medical-assistant-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-medsight}
+      POSTGRES_USER: ${POSTGRES_USER:-medsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Not exposed to the host by default — only the backend container needs it.
+    # Uncomment for local debugging with a DB client:
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-medsight}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: agentic-medical-assistant-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY must be set in .env}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-medsight}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-medsight}
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:4200,http://localhost:80}
+      # API_KEY protects the patient data endpoints (see backend/.env.example).
+      # Required — there is no default; the backend refuses to start without one.
+      - API_KEY=${API_KEY:?API_KEY must be set in .env}
+      # Signs login tokens. Required (32+ chars) so sessions survive restarts.
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in .env}
+      - ACCESS_TOKEN_MINUTES=${ACCESS_TOKEN_MINUTES:-60}
+      - ALLOW_API_KEY_AUTH=${ALLOW_API_KEY_AUTH:-true}
+      - REQUIRE_CLINICIAN_REVIEW=${REQUIRE_CLINICIAN_REVIEW:-true}
+      - AUDIT_ENABLED=${AUDIT_ENABLED:-true}
+      - OCR_GPU=${OCR_GPU:-false}
+      # First-run accounts (created only if the username does not exist).
+      - BOOTSTRAP_CLINICIAN_USERNAME=${BOOTSTRAP_CLINICIAN_USERNAME:-}
+      - BOOTSTRAP_CLINICIAN_PASSWORD=${BOOTSTRAP_CLINICIAN_PASSWORD:-}
+      - BOOTSTRAP_CLINICIAN_DISPLAY_NAME=${BOOTSTRAP_CLINICIAN_DISPLAY_NAME:-}
+      - BOOTSTRAP_PATIENT_USERNAME=${BOOTSTRAP_PATIENT_USERNAME:-}
+      - BOOTSTRAP_PATIENT_PASSWORD=${BOOTSTRAP_PATIENT_PASSWORD:-}
+      - BOOTSTRAP_PATIENT_PATIENT_ID=${BOOTSTRAP_PATIENT_PATIENT_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    # NOTE: users sign in with a username and password, so no secret is baked into the
+    # bundle. Leave apiKey blank in frontend/src/environments/environment.prod.ts; setting
+    # it enables the limited "service key" fallback on the login screen.
+    build: ./frontend
+    container_name: agentic-medical-assistant-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
