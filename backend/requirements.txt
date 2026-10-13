@@ -1,7 +1,9 @@
+# NOTE: aiohttp and pandas were removed - neither is imported anywhere in the code, and
+# aiohttp 3.9.5 alone carried 68 known advisories (found by pip-audit, see SECURITY.md).
 # API & framework
 fastapi==0.111.0
 uvicorn==0.30.1
-python-multipart==0.0.9
+python-multipart==0.0.31
 websockets==12.0
 
 # Gemini
@@ -27,10 +29,11 @@ gliner==0.2.9
 transformers==4.41.0
 torch==2.3.0
 
+# Auth
+PyJWT==2.15.1
+
 # Utilities
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 pydantic==2.7.4
 httpx==0.27.0
 numpy==1.26.4
-pandas==2.2.2
-aiohttp==3.9.5

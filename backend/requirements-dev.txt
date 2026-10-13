@@ -1,0 +1,17 @@
+# Lightweight set for tests + security scanning in CI. Deliberately EXCLUDES the heavy
+# ML stack (torch, GLiNER, EasyOCR, ChromaDB): tests/conftest.py stubs those modules,
+# so CI stays fast and doesn't need GPU wheels.
+fastapi==0.111.0
+uvicorn==0.30.1
+python-multipart==0.0.31
+sqlalchemy==2.0.30
+httpx==0.27.0
+python-dotenv==1.2.2
+PyJWT==2.15.1
+pydantic==2.7.4
+numpy==1.26.4
+pymupdf==1.24.1
+reportlab==4.4.2
+pytest==8.2.2
+bandit==1.7.9
+pip-audit==2.7.3

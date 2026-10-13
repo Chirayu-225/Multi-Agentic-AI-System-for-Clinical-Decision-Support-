@@ -1,6 +1,6 @@
 """
 src/tools/history_store.py
-ChromaDB patient history store — same logic as MedSight v1,
+ChromaDB patient history store — same logic as the prior single-agent version,
 adapted to the new project structure.
 """
 import json
@@ -85,3 +85,68 @@ def get_patient_history(patient_id: str) -> list[dict]:
 def get_historical_lab_values(patient_id: str) -> list[list[dict]]:
     history = get_patient_history(patient_id)
     return [r["lab_values"] for r in history]
+
+
+def semantic_search_history(patient_id: str, query: str, top_k: int = 3) -> list[dict]:
+    """
+    Tier 4 longitudinal intelligence — semantic recall.
+
+    Query this patient's stored report embeddings (already computed and
+    persisted by store_report() on every upload — nothing new to compute
+    here) for past reports whose TEXT is semantically similar to `query`.
+    This is meaning-based recall ("similar past episodes"), distinct from
+    the numeric lab-value comparisons in flag_trends/flag_baseline_deviation
+    — it can surface a recurring free-text pattern (symptoms, findings,
+    notes) that never shows up as a matching lab test name.
+
+    Returns up to top_k: { report_id, report_date, filename, similarity_pct,
+    snippet }, most similar first. similarity_pct is a 0-100 approximation
+    derived from Chroma's cosine distance (higher = more similar); treat it
+    as a relative ranking signal, not a calibrated probability.
+    """
+    try:
+        collection = _get_collection(patient_id)
+        if collection.count() == 0:
+            return []
+        embedder = _get_embedder()
+        query_embedding = embedder.encode(query).tolist()
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, collection.count()),
+            include=["metadatas", "documents", "distances"],
+        )
+    except Exception:
+        return []
+
+    if not results or not results.get("ids") or not results["ids"][0]:
+        return []
+
+    matches = []
+    ids = results["ids"][0]
+    metas = results["metadatas"][0]
+    docs = results["documents"][0]
+    dists = results["distances"][0]
+    for i in range(len(ids)):
+        # Chroma's cosine "distance" ranges roughly 0 (identical) .. 2
+        # (opposite); this is a rough, unnormalized similarity signal for
+        # ranking/display, not a calibrated probability.
+        similarity_pct = max(0.0, min(100.0, (1 - dists[i] / 2) * 100))
+        snippet = docs[i][:280] + ("…" if len(docs[i]) > 280 else "")
+        matches.append({
+            "report_id": ids[i],
+            "report_date": metas[i].get("report_date", ""),
+            "filename": metas[i].get("filename", ""),
+            "similarity_pct": round(similarity_pct, 1),
+            "snippet": snippet,
+        })
+    return matches
+
+
+def get_historical_report_dates(patient_id: str) -> list[str]:
+    """
+    Report dates (YYYY-MM-DD strings, possibly empty), oldest-first, in the
+    same order as get_historical_lab_values() — used for slope-based
+    forecasting to estimate elapsed time between visits.
+    """
+    history = get_patient_history(patient_id)
+    return [r["report_date"] for r in history]

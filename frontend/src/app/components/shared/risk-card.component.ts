@@ -1,7 +1,7 @@
 // src/app/components/shared/risk-card.component.ts
 import { Component, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { RiskFlag, TrendFlag } from '../../models/report.model';
+import { RiskFlag, TrendFlag, BaselineFlag } from '../../models/report.model';
 import { SeverityService } from '../../services/severity.service';
 
 @Component({
@@ -70,11 +70,40 @@ import { SeverityService } from '../../services/severity.service';
         }
       </div>
     }
+
+    <!-- Personal-baseline deviation flag (Tier 2 longitudinal intelligence) -->
+    @if (baseline) {
+      <div class="rounded-xl p-4 mb-3 border border-l-4 transition-transform hover:translate-x-0.5"
+           [style.border-color]="baselineColor"
+           [style.background]="baselineColor + '0D'">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-bold uppercase tracking-widest" [style.color]="baselineColor">
+            🎯 Personal baseline · {{ baseline!.test | titlecase }}
+          </span>
+          <span class="text-xs font-semibold font-mono px-2 py-0.5 rounded"
+                [style.background]="baselineColor + '20'"
+                [style.color]="baselineColor">
+            z={{ baseline!.z_score }} · {{ baseline!.pct_change_from_mean }}%
+          </span>
+        </div>
+        <p class="text-xs font-mono text-gray-500 mb-2">
+          current {{ baseline!.current_value }} {{ baseline!.unit }} vs. own avg
+          {{ baseline!.patient_mean }} ± {{ baseline!.patient_stdev }} {{ baseline!.unit }}
+        </p>
+        <p class="text-sm text-gray-400 leading-relaxed">{{ baseline!.message }}</p>
+        @if (baseline!.explanation) {
+          <div class="mt-3 pt-3 border-t border-gray-800 text-xs text-gray-500 italic leading-relaxed">
+            ↳ {{ baseline!.explanation }}
+          </div>
+        }
+      </div>
+    }
   `,
 })
 export class RiskCardComponent {
   @Input() flag: RiskFlag | null = null;
   @Input() trend: TrendFlag | null = null;
+  @Input() baseline: BaselineFlag | null = null;
   @Input() isAllClear = false;
 
   constructor(public sev: SeverityService) {}
@@ -85,5 +114,9 @@ export class RiskCardComponent {
 
   get trendColor(): string {
     return this.trend ? this.sev.getColor(this.trend.severity) : '#EAB308';
+  }
+
+  get baselineColor(): string {
+    return this.baseline ? this.sev.getColor(this.baseline.severity) : '#818CF8';
   }
 }

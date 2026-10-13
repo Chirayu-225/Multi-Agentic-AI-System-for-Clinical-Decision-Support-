@@ -1,0 +1,93 @@
+{
+  "meta": {
+    "cases": 200,
+    "seed": 42,
+    "data": "synthetic (seeded), no real patient data",
+    "live_verifier": false,
+    "seconds": 0.99
+  },
+  "extraction": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "by_layout_recall": {
+      "colon": 1.0,
+      "dash": 1.0,
+      "decimal_comma": 1.0,
+      "grouped": 1.0,
+      "sentence": 1.0,
+      "table": 1.0
+    },
+    "values_total": 1297
+  },
+  "flagging": {
+    "abnormal_recall": 0.9971,
+    "critical_recall": 1.0,
+    "false_alarm_rate_on_normal": 0.0,
+    "direction_accuracy": 0.9971,
+    "canonical_mapping_accuracy": 1.0,
+    "misrouted_test_names": [],
+    "unmapped_test_names": [],
+    "values_total": 1297
+  },
+  "deidentification": {
+    "oracle_entities": {
+      "leak_rate_by_identifier": {
+        "full_name": 0.0,
+        "name_uppercase": 0.0,
+        "last_first": 0.0,
+        "first_name_alone": 0.0,
+        "surname_alone": 0.0,
+        "phone": 0.0,
+        "email": 0.0,
+        "mrn": 0.0,
+        "aadhaar": 0.0,
+        "doctor": 0.0,
+        "hospital": 0.0
+      },
+      "cases_with_any_leak": 0.0,
+      "rehydration_clean": 1.0
+    },
+    "regex_only": {
+      "leak_rate_by_identifier": {
+        "full_name": 0.14,
+        "name_uppercase": 0.14,
+        "last_first": 0.0,
+        "first_name_alone": 0.14,
+        "surname_alone": 0.14,
+        "phone": 0.0,
+        "email": 0.0,
+        "mrn": 0.0,
+        "aadhaar": 0.0,
+        "doctor": 0.0,
+        "hospital": 0.0
+      },
+      "cases_with_any_leak": 0.14,
+      "rehydration_clean": 1.0
+    }
+  },
+  "injection": {
+    "attack_detection_rate": 1.0,
+    "attacks_total": 31,
+    "missed_attacks": [],
+    "benign_false_positive_rate": 0.0,
+    "benign_false_positives": [],
+    "synthetic_report_false_positive_rate": 0.0,
+    "known_evasions_still_undetected": 4,
+    "known_evasions_total": 4
+  },
+  "grounding": {
+    "catch_rate_by_corruption": {
+      "novel_value": 1.0,
+      "fabricated_lab": 0.995,
+      "value_swap": 0.0,
+      "wrong_direction": 0.0
+    },
+    "clean_summary_false_positive_rate": 0.0,
+    "note": "value_swap and wrong_direction use only numbers/words already in the ground truth, so a numeric check cannot see them - that is the job of the LLM Verifier (measure with --live)."
+  },
+  "interactions": {
+    "brand_resolution_accuracy": 1.0,
+    "rule_self_consistency": 1.0,
+    "rules_total": 16
+  }
+}

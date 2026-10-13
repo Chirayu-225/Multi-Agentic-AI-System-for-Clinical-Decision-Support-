@@ -21,21 +21,41 @@ import httpx
 import asyncio
 from typing import Any
 
+from src.security.llm_guardrails import sanitize_tool_arg, UnsafeToolArgument
+
 
 # ── Local tools ───────────────────────────────────────────────────────────────
+
+# Hard cap on how many chunks get run through NER per report. Raising this
+# improves recall on long/multi-page reports but costs latency (one GLiNER
+# inference per chunk) — 20 chunks * ~350 words/chunk covers ~7,000 words,
+# comfortably past a typical multi-page lab report.
+MAX_NER_CHUNKS = 20
+
 
 async def extract_entities(text: str) -> dict:
     """
     Extract medical entities from report text using GLiNER NER
     and a custom line-by-line lab value parser.
+
+    Long reports are processed only up to MAX_NER_CHUNKS chunks; when the
+    report is longer than that, the result carries a `truncated` flag and a
+    `chunks_processed`/`chunks_total` count so the caller (and ultimately the
+    clinician) can see that some of the document was not analysed, instead of
+    that silently happening.
     """
     try:
         from src.ner.medical_ner import extract_entities as _extract
         from src.ner.medical_ner import merge_chunk_entities
         from src.ingestion.document_loader import chunk_text
         chunks = chunk_text(text, chunk_size=400, overlap=50)
-        results = [_extract(c) for c in chunks[:8]]
-        return merge_chunk_entities(results)
+        used_chunks = chunks[:MAX_NER_CHUNKS]
+        results = [_extract(c) for c in used_chunks]
+        merged = merge_chunk_entities(results)
+        merged["truncated"] = len(chunks) > len(used_chunks)
+        merged["chunks_processed"] = len(used_chunks)
+        merged["chunks_total"] = len(chunks)
+        return merged
     except Exception as e:
         import traceback
         print(f"[TOOL ERROR] extract_entities failed: {traceback.format_exc()}")
@@ -48,6 +68,9 @@ async def extract_entities(text: str) -> dict:
             "dates": [],
             "providers": {"doctor": None, "hospital": None},
             "raw_entities": [],
+            "truncated": False,
+            "chunks_processed": 0,
+            "chunks_total": 0,
             "error": str(e),
         }
 
@@ -56,26 +79,46 @@ async def check_icmr_flags(lab_values: list[dict], gender: str = None) -> dict:
     """
     Check lab values against ICMR Indian reference ranges.
     Returns rule_flags with severity levels (NORMAL/MODERATE/HIGH/CRITICAL).
+
+    NOTE: this tool does NOT return a top-level risk summary any more — it
+    used to, but that summary was always computed with trend_flags=[] (this
+    tool runs before detect_trends in the agent's sequence), so the "Trends"
+    count in the UI's risk banner was silently always 0 regardless of what
+    detect_trends actually found. The unified risk_summary — across
+    population-range, trend, AND personal-baseline flags — is now computed
+    once by the orchestrator after all tool calls complete, so it can never
+    be missing a layer depending on tool-call order.
     """
-    from src.flagging.risk_flagging import flag_lab_values, compute_risk_summary
+    from src.flagging.risk_flagging import flag_lab_values
     flags = flag_lab_values(lab_values, gender=gender)
-    summary = compute_risk_summary(flags, [])
     return {
         "flags": [{**f, "severity": str(f["severity"])} for f in flags],
-        "summary": {**summary, "overall_severity": str(summary["overall_severity"])},
     }
 
 
-async def detect_trends(patient_id: str, current_labs: list[dict]) -> list[dict]:
+async def detect_trends(patient_id: str, current_labs: list[dict]) -> dict:
     """
-    Compare current lab values against patient's stored history
-    to detect consistently worsening trends across visits.
+    Compare current lab values against patient's stored history to detect:
+      - consistently worsening trends across visits (Layer 2),
+      - deviation from the patient's OWN historical baseline (Layer 3),
+        independent of whether it forms a smooth trend, and
+      - a slope-based projection of when a trending value would cross its
+        next clinically meaningful threshold (Layer 4 — illustrative only).
+
+    Returns: { "trend_flags": [...], "baseline_flags": [...], "forecast_flags": [...] }
     """
-    from src.flagging.risk_flagging import flag_trends
-    from src.tools.history_store import get_historical_lab_values
+    from src.flagging.risk_flagging import flag_trends, flag_baseline_deviation, flag_forecast
+    from src.tools.history_store import get_historical_lab_values, get_historical_report_dates
     historical = get_historical_lab_values(patient_id)
+    historical_dates = get_historical_report_dates(patient_id)
     trends = flag_trends(current_labs, historical)
-    return [{**t, "severity": str(t["severity"])} for t in trends]
+    baseline = flag_baseline_deviation(current_labs, historical)
+    forecast = flag_forecast(current_labs, historical, historical_dates)
+    return {
+        "trend_flags": [{**t, "severity": str(t["severity"])} for t in trends],
+        "baseline_flags": [{**b, "severity": str(b["severity"])} for b in baseline],
+        "forecast_flags": [{**f, "severity": str(f["severity"])} for f in forecast],
+    }
 
 
 async def get_patient_history(patient_id: str) -> list[dict]:
@@ -87,6 +130,18 @@ async def get_patient_history(patient_id: str) -> list[dict]:
     return _get(patient_id)
 
 
+async def get_similar_history(patient_id: str, query: str, top_k: int = 3) -> dict:
+    """
+    Semantically search this patient's past report TEXT for episodes similar
+    in meaning to `query` — e.g. recurring symptoms or findings phrased
+    differently across visits. Distinct from detect_trends/check_icmr_flags,
+    which only compare numeric lab values.
+    """
+    from src.tools.history_store import semantic_search_history
+    matches = semantic_search_history(patient_id, query, top_k=top_k)
+    return {"matches": matches}
+
+
 # ── External tools ────────────────────────────────────────────────────────────
 
 async def search_pubmed(query: str, max_results: int = 3) -> list[dict]:
@@ -96,6 +151,14 @@ async def search_pubmed(query: str, max_results: int = 3) -> list[dict]:
 
     Returns: list of { title, abstract_snippet, pmid, url }
     """
+    # `query` is an argument the AGENT chose, based on content it read from
+    # the (untrusted) document — sanitize before it reaches an external API,
+    # same provenance concern as the document text itself.
+    try:
+        query = sanitize_tool_arg(query, max_len=200, field_name="search_pubmed query")
+    except UnsafeToolArgument as e:
+        return [{"error": str(e), "query": query}]
+
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -149,6 +212,11 @@ async def check_drug_safety(medication_name: str) -> dict:
     Returns: { medication, has_warnings, warnings, recalls }
     """
     try:
+        medication_name = sanitize_tool_arg(medication_name, max_len=100, field_name="medication_name")
+    except UnsafeToolArgument as e:
+        return {"medication": medication_name, "error": str(e), "source": "N/A"}
+
+    try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Check for adverse events / warnings
             resp = await client.get(
@@ -191,7 +259,7 @@ async def check_drug_safety(medication_name: str) -> dict:
         return {"medication": medication_name, "error": str(e), "source": "OpenFDA"}
 
 
-# ── Tool schema for Gemini function calling ───────────────────────────────────
+# ── Tool schema for Gemini function calling ────────────────────────────────────
 
 TOOL_DEFINITIONS = [
     {
@@ -226,7 +294,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "detect_trends",
-        "description": "Detect worsening trends in lab values across multiple patient visits using longitudinal history.",
+        "description": "Detect worsening trends across multiple patient visits AND deviation from the patient's own historical baseline, using longitudinal history.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -249,6 +317,28 @@ TOOL_DEFINITIONS = [
                 "patient_id": {"type": "string", "description": "Patient identifier"}
             },
             "required": ["patient_id"],
+        },
+    },
+    {
+        "name": "get_similar_history",
+        "description": (
+            "Semantically search this patient's past report TEXT for episodes similar in "
+            "meaning to a query (e.g. recurring symptoms/findings phrased differently across "
+            "visits) — not a lab-value comparison. Only call when the patient has prior "
+            "history AND the current report has a notable free-text symptom, finding, or "
+            "diagnosis worth checking for recurrence."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patient_id": {"type": "string", "description": "Patient identifier"},
+                "query": {
+                    "type": "string",
+                    "description": "Symptom/finding/diagnosis phrase to search for, e.g. 'recurring abdominal pain'",
+                },
+                "top_k": {"type": "integer", "description": "Max number of past episodes to return (default 3)"},
+            },
+            "required": ["patient_id", "query"],
         },
     },
     {
@@ -287,6 +377,7 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "check_icmr_flags":   check_icmr_flags,
     "detect_trends":      detect_trends,
     "get_patient_history": get_patient_history,
+    "get_similar_history": get_similar_history,
     "search_pubmed":      search_pubmed,
     "check_drug_safety":  check_drug_safety,
 }

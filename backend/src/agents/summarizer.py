@@ -12,16 +12,30 @@ import asyncio
 
 import google.generativeai as genai
 
+from src.security.deidentification import redact
+
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def _build_context(entities: dict, flags: list, trend_flags: list,
-                   pubmed_refs: list, drug_safety: list) -> str:
+                   pubmed_refs: list, drug_safety: list,
+                   baseline_flags: list | None = None,
+                   redaction_map: dict | None = None,
+                   drug_interactions: list | None = None) -> str:
     lines = []
     patient = entities.get("patient", {})
     if any(patient.values()):
-        parts = [v for v in patient.values() if v]
+        # Patient name is a direct identifier — redact it before it reaches
+        # this function's caller's Gemini prompt (LLM02:2026, see
+        # deidentification.py). Age/gender are kept as-is: they're clinical
+        # context the summary genuinely needs, not identifiers on their own.
+        redaction_map = redaction_map or {}
+        parts = []
+        for key, value in patient.items():
+            if not value:
+                continue
+            parts.append(redact(value, redaction_map) if key == "name" else value)
         lines.append(f"Patient: {', '.join(parts)}")
 
     diagnoses = entities.get("clinical", {}).get("diagnoses", [])
@@ -43,6 +57,11 @@ def _build_context(entities: dict, flags: list, trend_flags: list,
         for t in trend_flags:
             lines.append(f"  [{t['severity']}] {t['test']}: {t.get('message', '')}")
 
+    if baseline_flags:
+        lines.append("Personal-baseline deviations (vs. this patient's own history):")
+        for b in baseline_flags:
+            lines.append(f"  [{b['severity']}] {b['test']}: {b.get('message', '')}")
+
     if pubmed_refs:
         lines.append("Clinical evidence found:")
         for ref in pubmed_refs[:2]:
@@ -52,7 +71,18 @@ def _build_context(entities: dict, flags: list, trend_flags: list,
     if drug_safety:
         for ds in drug_safety:
             if ds.get("has_warnings"):
-                lines.append(f"Drug safety alert — {ds['medication']}: {ds.get('boxed_warning', '')[:200]}")
+                # boxed_warning/warnings_snippet can each be explicitly None
+                # (not just absent) when OpenFDA didn't return one — `dict.get`
+                # only falls back to its default for a MISSING key, not a
+                # present key whose value is None, so `or ""` is required
+                # here (a bare `.get(..., "")[:200]` crashes on None).
+                detail = ds.get("boxed_warning") or ds.get("warnings_snippet") or ""
+                lines.append(f"Drug safety alert — {ds['medication']}: {detail[:200]}")
+
+    if drug_interactions:
+        lines.append("Medication interaction alerts (curated rules - state them as flagged, do not extend them):")
+        for it in drug_interactions[:5]:
+            lines.append(f"  [{it['severity']}] {' + '.join(it['drugs'])}: {it['effect']}")
 
     return "\n".join(lines)
 
@@ -63,15 +93,27 @@ async def generate_summaries(
     trend_flags: list,
     pubmed_refs: list = None,
     drug_safety: list = None,
+    baseline_flags: list = None,
+    redaction_map: dict | None = None,
+    drug_interactions: list | None = None,
 ) -> dict:
     """
     Generate all summaries in a SINGLE Gemini API call to preserve quota.
-    Returns: { clinical_summary, patient_summary, explained_flags, followup_actions }
+    Returns: { clinical_summary, patient_summary, explained_flags, followup_actions,
+               longitudinal_narrative }
+
+    IMPORTANT: the returned text still contains redaction placeholders (e.g.
+    "[REDACTED_NAME_1]") wherever the patient's name would appear — see
+    deidentification.py. The caller (main.py) is responsible for calling
+    rehydrate() on every field here exactly once, after the Verifier has
+    also run on this same (still-redacted) text. Do NOT rehydrate here.
     """
+    baseline_flags = baseline_flags or []
     model = genai.GenerativeModel(model_name=MODEL)
     context = _build_context(
         entities, flags, trend_flags,
-        pubmed_refs or [], drug_safety or []
+        pubmed_refs or [], drug_safety or [],
+        baseline_flags, redaction_map, drug_interactions,
     )
     abnormal = [f for f in flags if f.get("severity") not in ("NORMAL", "Severity.NORMAL")]
 
@@ -79,6 +121,8 @@ async def generate_summaries(
     flag_lines = ""
     for i, f in enumerate(abnormal):
         flag_lines += f"\nFLAG_{i}: {f.get('message', '')} (source: {f.get('source', 'ICMR')})"
+
+    has_trends = bool(trend_flags) or bool(baseline_flags)
 
     prompt = f"""You are a clinical decision support assistant for Indian healthcare.
 Given the following verified patient data, produce ALL of the following outputs in ONE response.
@@ -103,6 +147,15 @@ Format: FLAG_0: <explanation>
 
 SECTION: FOLLOWUP_ACTIONS
 List 3 specific numbered follow-up actions for the GP based on the findings.
+
+SECTION: LONGITUDINAL_NARRATIVE
+{"Write a short (80 words max) narrative tracing this patient's trajectory across visits, "
+ "using ONLY the 'Longitudinal trends' and 'Personal-baseline deviations' values listed "
+ "above (cite the actual values and the visit-over-visit direction; if a value is flagged "
+ "only as a personal-baseline deviation, note that it may still be within the general "
+ "population's normal range). Do not speculate about a diagnosis or cause — describe the "
+ "pattern only, and end with one sentence on why a clinician should look at the trend, not "
+ "just the latest value." if has_trends else "Write exactly: N/A"}
 """
 
     # Retry on rate limit
@@ -122,6 +175,7 @@ List 3 specific numbered follow-up actions for the GP based on the findings.
                     "patient_summary": "Summary unavailable.",
                     "explained_flags": [{**f, "explanation": ""} for f in abnormal],
                     "followup_actions": ["Consult a healthcare provider."],
+                    "longitudinal_narrative": "",
                 }
     else:
         return {
@@ -129,6 +183,7 @@ List 3 specific numbered follow-up actions for the GP based on the findings.
             "patient_summary": "Summary unavailable — quota exceeded.",
             "explained_flags": [{**f, "explanation": ""} for f in abnormal],
             "followup_actions": ["Consult a healthcare provider."],
+            "longitudinal_narrative": "",
         }
 
     text = response.text.strip()
@@ -138,10 +193,11 @@ List 3 specific numbered follow-up actions for the GP based on the findings.
         m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         return m.group(1).strip() if m else ""
 
-    clinical  = _extract_section("CLINICAL_SUMMARY")
-    patient   = _extract_section("PATIENT_SUMMARY")
-    flag_exps = _extract_section("FLAG_EXPLANATIONS")
-    followup  = _extract_section("FOLLOWUP_ACTIONS")
+    clinical   = _extract_section("CLINICAL_SUMMARY")
+    patient    = _extract_section("PATIENT_SUMMARY")
+    flag_exps  = _extract_section("FLAG_EXPLANATIONS")
+    followup   = _extract_section("FOLLOWUP_ACTIONS")
+    narrative  = _extract_section("LONGITUDINAL_NARRATIVE")
 
     # Parse flag explanations
     explained = []
@@ -163,4 +219,8 @@ List 3 specific numbered follow-up actions for the GP based on the findings.
         "patient_summary": patient or "Your results have been reviewed.",
         "explained_flags": explained,
         "followup_actions": actions,
+        # Only surface a narrative when there's actually a trend to narrate —
+        # showing "not enough history yet" on every single upload (including
+        # a patient's very first report) would just be repetitive noise.
+        "longitudinal_narrative": (narrative or "Trend detected across visits.") if has_trends else "",
     }

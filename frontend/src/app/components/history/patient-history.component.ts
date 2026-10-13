@@ -1,24 +1,30 @@
 // src/app/components/history/patient-history.component.ts
-import { Component, signal, OnInit } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { Component, OnDestroy, computed, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SeverityService } from '../../services/severity.service';
-import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/report.model';
+import { errorMessage } from '../../services/error-message';
+import {
+  PatientHistory, PatientHistoryReport, PatientTrends, ReviewStatus, TrendSeries,
+} from '../../models/report.model';
+import { TrendChartComponent } from '../shared/trend-chart.component';
+
+const TRENDS_SHOWN = 12;
 
 @Component({
   selector: 'app-patient-history',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [FormsModule, TrendChartComponent],
   template: `
-    <div class="min-h-screen bg-gray-950 text-gray-100 p-6">
+    <div class="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6">
 
       <!-- Header -->
       <div class="mb-8">
         <p class="text-xs font-semibold text-blue-400 uppercase tracking-widest mb-1">
           Longitudinal Tracking
         </p>
-        <h1 class="text-3xl font-bold text-white tracking-tight">Patient History</h1>
+        <h1 class="text-2xl sm:text-3xl font-bold text-white tracking-tight">Patient History</h1>
         <p class="text-gray-500 mt-1 text-sm">
           View lab value trends and risk patterns across multiple visits.
         </p>
@@ -26,11 +32,13 @@ import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/rep
 
       <!-- Search -->
       <div class="max-w-md mb-6">
-        <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+        <label for="history-patient-id"
+               class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
           Patient ID
         </label>
         <div class="flex gap-3">
           <input
+            id="history-patient-id"
             [(ngModel)]="patientId"
             placeholder="e.g. PT-2026-001"
             (keydown.enter)="loadHistory()"
@@ -48,6 +56,41 @@ import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/rep
         </div>
       </div>
 
+      @if (error()) {
+        <div role="alert" class="mb-4 rounded-xl p-3 border border-red-500/40 bg-red-500/10 text-sm text-red-300">
+          {{ error() }}
+        </div>
+      }
+
+      <!-- Idle empty state — before any search has been made -->
+      @if (!history() && !loading() && !error()) {
+        <div class="border border-dashed border-gray-800 rounded-xl px-6 py-12
+                    flex flex-col items-center text-center bg-gray-900/30">
+          <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600/20 to-sky-500/20
+                      border border-blue-500/20 flex items-center justify-center text-2xl mb-4">
+            📈
+          </div>
+          <p class="text-sm font-medium text-gray-400 mb-1.5">No patient loaded</p>
+          <p class="text-xs text-gray-600 max-w-sm leading-relaxed">
+            Enter a patient ID above to view their lab value trends, personal-baseline
+            deviations and visit-by-visit report history.
+          </p>
+        </div>
+      }
+
+      <!-- Loading state (first search only — a re-search keeps the existing results visible) -->
+      @if (loading() && !history()) {
+        <div class="border border-gray-800 rounded-xl px-6 py-12
+                    flex flex-col items-center text-center bg-gray-900/30">
+          <div class="flex gap-1.5 mb-4">
+            <span class="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span>
+            <span class="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.15s]"></span>
+            <span class="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.3s]"></span>
+          </div>
+          <p class="text-sm text-gray-500">Loading patient history...</p>
+        </div>
+      }
+
       <!-- Results -->
       @if (history()) {
         <div class="mb-4 text-sm text-gray-500">
@@ -56,83 +99,59 @@ import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/rep
         </div>
 
         @if (history()!.reports.length === 0) {
-          <div class="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
-            <p class="text-gray-600 text-sm">No reports found for this patient ID.</p>
+          <div class="bg-gray-900 border border-dashed border-gray-800 rounded-xl p-12
+                      flex flex-col items-center text-center">
+            <div class="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-xl mb-3">
+              📄
+            </div>
+            <p class="text-gray-400 text-sm font-medium mb-1">No reports found</p>
+            <p class="text-gray-600 text-xs max-w-xs leading-relaxed">
+              This patient ID has no analysed reports yet. Run an analysis from the
+              Analyse Report page to start building their history.
+            </p>
           </div>
         } @else {
 
-          <!-- Lab trend chart -->
-          @if (availableTests().length) {
-            <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
-              <div class="flex items-center justify-between mb-4">
-                <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">
-                  Lab Value Trend
-                </p>
-                <select
-                  [(ngModel)]="selectedTest"
-                  (ngModelChange)="onTestChange()"
-                  class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5
-                         text-gray-300 text-sm font-mono focus:outline-none focus:border-blue-500">
-                  @for (test of availableTests(); track test) {
-                    <option [value]="test">{{ test }}</option>
-                  }
-                </select>
-              </div>
-
-              <!-- SVG sparkline chart -->
-              @if (chartPoints().length >= 2) {
-                <div class="relative h-40">
-                  <svg class="w-full h-full" viewBox="0 0 600 160" preserveAspectRatio="none">
-                    <!-- Grid lines -->
-                    @for (line of [0, 1, 2, 3]; track line) {
-                      <line [attr.x1]="0" [attr.y1]="line * 40"
-                            [attr.x2]="600" [attr.y2]="line * 40"
-                            stroke="#1F2937" stroke-width="1"/>
-                    }
-                    <!-- Area fill -->
-                    <path [attr.d]="areaPath()" [attr.fill]="trendColor() + '15'"/>
-                    <!-- Line -->
-                    <polyline
-                      [attr.points]="linePoints()"
-                      fill="none"
-                      [attr.stroke]="trendColor()"
-                      stroke-width="2.5"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"/>
-                    <!-- Dots -->
-                    @for (pt of chartPoints(); track $index) {
-                      <circle
-                        [attr.cx]="pt.x"
-                        [attr.cy]="pt.y"
-                        r="5"
-                        [attr.fill]="trendColor()"
-                        stroke="#030712"
-                        stroke-width="2"/>
-                    }
-                  </svg>
-                  <!-- X-axis labels -->
-                  <div class="flex justify-between mt-1 px-1">
-                    @for (report of sortedReports(); track report.report_id) {
-                      <span class="text-xs text-gray-600 font-mono">
-                        {{ report.report_date | slice:0:7 }}
-                      </span>
-                    }
-                  </div>
-                </div>
-              } @else {
-                <p class="text-sm text-gray-600 text-center py-8">
-                  Upload more reports for this patient to see trends.
-                </p>
+          <!-- Lab trends -->
+          <div class="mb-6">
+            <div class="flex items-center justify-between mb-3 pb-2 border-b border-gray-800">
+              <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Lab trends</p>
+              @if (series().length > shownLimit) {
+                <button type="button" (click)="showAll.set(!showAll())"
+                        class="text-xs text-blue-400 hover:text-blue-300 transition-colors">
+                  {{ showAll() ? 'Show fewer' : 'Show all (' + series().length + ')' }}
+                </button>
               }
             </div>
-          }
+            @if (trendsLoading()) {
+              <p class="text-sm text-gray-600 py-4" role="status">Loading lab trends...</p>
+            } @else if (trendsError()) {
+              <p role="alert" class="text-sm text-red-300">{{ trendsError() }}</p>
+            } @else if (!series().length) {
+              <p class="text-sm text-gray-600 py-4">
+                No numeric lab results with a recorded unit were found for this patient yet.
+              </p>
+            } @else {
+              <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                @for (s of visibleSeries(); track s.test + '|' + s.unit) {
+                  <app-trend-chart [series]="s" />
+                }
+              </div>
+              @if (maxPoints() < 2) {
+                <p class="text-xs text-gray-600 mt-3">
+                  Upload more reports for this patient to see how values change over time.
+                </p>
+              }
+            }
+          </div>
 
           <!-- Visit history cards -->
           <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest
                      pb-2 border-b border-gray-800 mb-4">Visit History</p>
 
           @for (report of sortedReports().slice().reverse(); track report.report_id) {
-            <div class="bg-gray-900 border border-gray-800 rounded-xl mb-3 overflow-hidden">
+            <div class="bg-gray-900 border border-gray-800 rounded-xl mb-3 overflow-hidden
+                        hover:border-gray-700 transition-colors">
               <button
                 class="w-full flex items-center justify-between px-5 py-4 text-left
                        hover:bg-gray-800/50 transition-colors"
@@ -140,11 +159,17 @@ import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/rep
                 <div class="flex items-center gap-3">
                   <span class="text-gray-400 text-sm">📄</span>
                   <div>
-                    <p class="text-sm font-medium text-gray-200">{{ report.filename }}</p>
+                    <p class="text-sm font-medium text-gray-200 break-all">{{ report.filename }}</p>
                     <p class="text-xs text-gray-500 font-mono">{{ report.report_date }}</p>
                   </div>
                 </div>
-                <div class="flex items-center gap-3">
+                <div class="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
+                  @if (report.review_status) {
+                    <span class="text-[11px] font-semibold px-2 py-0.5 rounded border"
+                          [class]="reviewChipClass(report.review_status)">
+                      {{ reviewLabel(report.review_status) }}
+                    </span>
+                  }
                   @if (report.risk_summary?.overall_severity) {
                     <span class="text-xs font-semibold px-2 py-0.5 rounded font-mono"
                           [style.color]="sev.getColor(report.risk_summary.overall_severity)"
@@ -192,26 +217,71 @@ import { PatientHistory, PatientHistoryReport, LabValue } from '../../models/rep
     </div>
   `,
 })
-export class PatientHistoryComponent {
+export class PatientHistoryComponent implements OnDestroy {
   patientId  = '';
   loading    = signal(false);
+  error      = signal<string | null>(null);
   history    = signal<PatientHistory | null>(null);
-  selectedTest = '';
   expandedReports = signal(new Set<string>());
+
+  trends        = signal<PatientTrends | null>(null);
+  trendsLoading = signal(false);
+  trendsError   = signal<string | null>(null);
+  showAll       = signal(false);
+  readonly shownLimit = TRENDS_SHOWN;
+
+  // Series with the most readings first (stable for ties).
+  series = computed<TrendSeries[]>(() =>
+    [...(this.trends()?.series ?? [])]
+      .filter((s) => s.points?.length)
+      .sort((a, b) => b.points.length - a.points.length)
+  );
+  visibleSeries = computed(() =>
+    this.showAll() ? this.series() : this.series().slice(0, TRENDS_SHOWN)
+  );
+  maxPoints = computed(() => Math.max(0, ...this.series().map((s) => s.points.length)));
+
+  private histSub?: Subscription;
+  private trendSub?: Subscription;
 
   constructor(private api: ApiService, public sev: SeverityService) {}
 
   loadHistory(): void {
-    if (!this.patientId) return;
+    const pid = this.patientId.trim();
+    if (!pid) return;
+    this.histSub?.unsubscribe();
+    this.trendSub?.unsubscribe();
     this.loading.set(true);
-    this.api.getPatientHistory(this.patientId).subscribe({
+    this.error.set(null);
+    this.trendsError.set(null);
+    this.trendsLoading.set(true);
+    this.showAll.set(false);
+
+    this.histSub = this.api.getPatientHistory(pid).subscribe({
       next: (h) => {
         this.history.set(h);
         this.loading.set(false);
-        const tests = this.availableTests();
-        if (tests.length) this.selectedTest = tests[0];
       },
-      error: () => this.loading.set(false),
+      error: (err) => {
+        this.history.set(null);
+        this.trends.set(null);
+        this.loading.set(false);
+        this.trendsLoading.set(false);
+        this.trendSub?.unsubscribe();
+        this.error.set(errorMessage(err, 'Could not load this patient\'s history.'));
+      },
+    });
+
+    this.trendSub = this.api.getPatientTrends(pid).subscribe({
+      next: (t) => {
+        this.trends.set(t);
+        this.trendsLoading.set(false);
+      },
+      error: (err) => {
+        this.trends.set(null);
+        this.trendsLoading.set(false);
+        this.trendsError.set(errorMessage(err, 'Could not load lab trends.'));
+      },
     });
   }
 
@@ -221,55 +291,16 @@ export class PatientHistoryComponent {
     );
   }
 
-  availableTests(): string[] {
-    const tests = new Set<string>();
-    this.sortedReports().forEach(r =>
-      r.lab_values?.forEach(l => { if (l.value !== null) tests.add(l.test); })
-    );
-    return [...tests];
+  reviewLabel(s: ReviewStatus): string {
+    return s === 'approved' ? 'Approved' : s === 'rejected' ? 'Rejected' : 'Pending review';
   }
 
-  onTestChange(): void {}
-
-  chartPoints(): Array<{ x: number; y: number; value: number }> {
-    const reports = this.sortedReports();
-    const values: number[] = [];
-    reports.forEach(r => {
-      const lab = r.lab_values?.find(l => l.test === this.selectedTest && l.value !== null);
-      if (lab) values.push(Number(lab.value));
-    });
-    if (values.length < 2) return [];
-
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
-    const W = 600, H = 140, PAD = 20;
-
-    return values.map((v, i) => ({
-      x: PAD + (i / (values.length - 1)) * (W - PAD * 2),
-      y: H - PAD - ((v - min) / range) * (H - PAD * 2),
-      value: v,
-    }));
-  }
-
-  linePoints(): string {
-    return this.chartPoints().map(p => `${p.x},${p.y}`).join(' ');
-  }
-
-  areaPath(): string {
-    const pts = this.chartPoints();
-    if (!pts.length) return '';
-    const H = 140;
-    return `M${pts[0].x},${H} ` +
-      pts.map(p => `L${p.x},${p.y}`).join(' ') +
-      ` L${pts[pts.length - 1].x},${H} Z`;
-  }
-
-  trendColor(): string {
-    const pts = this.chartPoints();
-    if (pts.length < 2) return '#60A5FA';
-    return pts[pts.length - 1].value < pts[0].value ? '#EF4444' :
-           pts[pts.length - 1].value > pts[0].value ? '#22C55E' : '#60A5FA';
+  reviewChipClass(s: ReviewStatus): string {
+    return s === 'approved'
+      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+      : s === 'rejected'
+        ? 'bg-red-500/15 text-red-300 border-red-500/30'
+        : 'bg-amber-500/15 text-amber-300 border-amber-500/30';
   }
 
   toggleReport(id: string): void {
@@ -278,5 +309,10 @@ export class PatientHistoryComponent {
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+  }
+
+  ngOnDestroy(): void {
+    this.histSub?.unsubscribe();
+    this.trendSub?.unsubscribe();
   }
 }

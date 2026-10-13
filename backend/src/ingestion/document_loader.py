@@ -1,13 +1,20 @@
 """
 src/ingestion/document_loader.py
 
-Handles PDF ingestion for MedSight.
+Handles document ingestion for the Agentic Medical Assistant.
 Supports:
   - Digital PDFs (text-based) via PyMuPDF
   - Scanned/handwritten PDFs via EasyOCR
+  - Phone photos / scans as JPEG, PNG or WebP (preprocessed, then EasyOCR)
   - Mixed Hindi/English reports via langdetect + indic-transliteration
+
+OCR runs LOCALLY on purpose. Sending the page image to a hosted vision model would put
+the patient's name, ID numbers and everything else on the page in a third-party request,
+which would bypass the de-identification layer (deidentification.py can only redact TEXT
+it controls). OCR output goes through the same redact-before-send path as any other text.
 """
 
+import os
 import fitz  # PyMuPDF
 import easyocr
 import numpy as np
@@ -23,9 +30,65 @@ _ocr_reader = None
 def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
-        # Support English + Hindi
-        _ocr_reader = easyocr.Reader(["en", "hi"], gpu=True)
+        # Support English + Hindi. OCR_GPU=true|false|auto (default auto: use a GPU only
+        # if torch can see one - the old hard-coded gpu=True warned/failed on CPU boxes).
+        _ocr_reader = easyocr.Reader(["en", "hi"], gpu=_use_gpu())
     return _ocr_reader
+
+
+def _use_gpu() -> bool:
+    setting = os.getenv("OCR_GPU", "auto").lower()
+    if setting in ("true", "1", "yes"):
+        return True
+    if setting in ("false", "0", "no"):
+        return False
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+# ── File-type validation ──────────────────────────────────────────────────────
+
+PDF_EXTS = {".pdf"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_EXTS = PDF_EXTS | IMAGE_EXTS
+
+
+def sniff_file_type(path: str) -> str | None:
+    """Identify a file by its leading bytes ("pdf", "jpeg", "png", "webp") or None.
+    The upload endpoint checks this against the extension so a renamed executable or HTML
+    file cannot be pushed into the PDF/OCR parsers just by calling it report.pdf."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    if head.startswith(b"%PDF-"):
+        return "pdf"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def extension_matches_content(filename: str, sniffed: str | None) -> bool:
+    ext = Path(filename).suffix.lower()
+    if sniffed is None:
+        return False
+    if ext in PDF_EXTS:
+        return sniffed == "pdf"
+    if ext in (".jpg", ".jpeg"):
+        return sniffed == "jpeg"
+    if ext == ".png":
+        return sniffed == "png"
+    if ext == ".webp":
+        return sniffed == "webp"
+    return False
 
 
 def _is_digital_pdf(pdf_path: str) -> bool:
@@ -48,11 +111,32 @@ def _extract_digital(pdf_path: str) -> str:
     return "\n\n".join(pages)
 
 
-def _extract_scanned(pdf_path: str) -> str:
-    """Extract text from a scanned PDF using EasyOCR."""
+def _ocr_array(reader, img_array) -> tuple[str, list[float]]:
+    """Run EasyOCR on one image; return (text in reading order, per-box confidences).
+    Boxes are grouped into lines by vertical position so 'Hemoglobin' and '9.2 g/dL' that
+    sit on one visual row end up on one text line - the lab-value parser is line-based."""
+    results = reader.readtext(img_array, detail=1, paragraph=False)
+    boxes = []
+    for box, text, conf in results:
+        ys = [pt[1] for pt in box]
+        xs = [pt[0] for pt in box]
+        boxes.append((sum(ys) / len(ys), min(xs), max(ys) - min(ys), text, float(conf)))
+    boxes.sort(key=lambda b: (b[0], b[1]))
+    lines: list[list[tuple]] = []
+    for b in boxes:
+        if lines and abs(b[0] - lines[-1][0][0]) <= max(8.0, 0.6 * b[2]):
+            lines[-1].append(b)
+        else:
+            lines.append([b])
+    text = "\n".join(" ".join(t[3] for t in sorted(line, key=lambda t: t[1])) for line in lines)
+    return text, [b[4] for b in boxes]
+
+
+def _extract_scanned(pdf_path: str) -> tuple[str, float | None]:
+    """Extract text from a scanned PDF using EasyOCR. Returns (text, mean confidence)."""
     reader = _get_ocr_reader()
     doc = fitz.open(pdf_path)
-    pages = []
+    pages, confs = [], []
     for page in doc:
         # Render page as image at 200 DPI
         mat = fitz.Matrix(200 / 72, 200 / 72)
@@ -60,10 +144,41 @@ def _extract_scanned(pdf_path: str) -> str:
         img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
             pix.height, pix.width, pix.n
         )
-        results = reader.readtext(img_array, detail=0, paragraph=True)
-        pages.append(" ".join(results))
+        text, c = _ocr_array(reader, img_array)
+        pages.append(text)
+        confs += c
     doc.close()
-    return "\n\n".join(pages)
+    return "\n\n".join(pages), (sum(confs) / len(confs) if confs else None)
+
+
+def preprocess_image(img):
+    """Make a phone photo / flatbed scan friendlier to OCR: honour EXIF rotation, convert
+    to greyscale, stretch contrast, and upscale small images (OCR accuracy drops sharply
+    below ~1000px on the long edge). Takes and returns a PIL image."""
+    from PIL import ImageOps
+    img = ImageOps.exif_transpose(img)
+    img = ImageOps.grayscale(img)
+    img = ImageOps.autocontrast(img, cutoff=1)
+    long_edge = max(img.size)
+    if long_edge < 1400:
+        scale = 1400 / long_edge
+        img = img.resize((int(img.width * scale), int(img.height * scale)))
+    return img
+
+
+MAX_IMAGE_PIXELS = 40_000_000  # reject decompression-bomb style images
+
+
+def _extract_image(image_path: str) -> tuple[str, float | None]:
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    with Image.open(image_path) as im:
+        if im.width * im.height > MAX_IMAGE_PIXELS:
+            raise ValueError("Image is too large to process safely.")
+        prepared = preprocess_image(im.convert("RGB"))
+    arr = np.array(prepared.convert("RGB"))
+    text, confs = _ocr_array(_get_ocr_reader(), arr)
+    return text, (sum(confs) / len(confs) if confs else None)
 
 
 def _transliterate_hindi(text: str) -> str:
@@ -91,7 +206,8 @@ def _transliterate_hindi(text: str) -> str:
 
 def load_document(pdf_path: str) -> dict:
     """
-    Main entry point. Load a medical PDF and return structured text.
+    Main entry point. Load a medical PDF (or a JPEG/PNG/WebP photo of a report) and
+    return structured text.
 
     Returns:
         {
@@ -106,13 +222,19 @@ def load_document(pdf_path: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    is_digital = _is_digital_pdf(pdf_path)
-    source_type = "digital" if is_digital else "scanned"
-
-    if is_digital:
-        raw_text = _extract_digital(pdf_path)
+    ocr_confidence = None
+    if path.suffix.lower() in IMAGE_EXTS:
+        source_type = "scanned_image"
+        raw_text, ocr_confidence = _extract_image(pdf_path)
+        num_pages_override = 1
     else:
-        raw_text = _extract_scanned(pdf_path)
+        num_pages_override = None
+        is_digital = _is_digital_pdf(pdf_path)
+        source_type = "digital" if is_digital else "scanned"
+        if is_digital:
+            raw_text = _extract_digital(pdf_path)
+        else:
+            raw_text, ocr_confidence = _extract_scanned(pdf_path)
 
     # Check for Hindi content and transliterate
     has_hindi = False
@@ -128,9 +250,12 @@ def load_document(pdf_path: str) -> dict:
         raw_text = _transliterate_hindi(raw_text)
 
     # Count pages
-    doc = fitz.open(pdf_path)
-    num_pages = len(doc)
-    doc.close()
+    if num_pages_override is not None:
+        num_pages = num_pages_override
+    else:
+        doc = fitz.open(pdf_path)
+        num_pages = len(doc)
+        doc.close()
 
     return {
         "raw_text": raw_text,
@@ -138,6 +263,9 @@ def load_document(pdf_path: str) -> dict:
         "has_hindi": has_hindi,
         "pages": num_pages,
         "filename": path.name,
+        # Mean OCR confidence in [0,1]; None for digital PDFs. main.py turns a low value
+        # into an ingestion warning so a clinician knows the numbers may be misread.
+        "ocr_confidence": ocr_confidence,
     }
 
 

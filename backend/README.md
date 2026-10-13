@@ -1,115 +1,49 @@
-# MedSight v2 — Multi-Agent Clinical Intelligence System
+# Agentic Medical Assistant backend
 
-> A cloud-native, multi-agent clinical decision support system for Indian healthcare settings.
-> Built with Angular, FastAPI, PostgreSQL, and Gemini 2.5 Flash.
+Backend-specific quick reference. **See the [repository root README](../README.md) for
+full setup, architecture, the longitudinal-intelligence tiers, and the security model** —
+this file used to duplicate that content with some details drifted out of sync; it now
+just points there plus a few backend-only dev notes.
 
----
-
-## Architecture
-
-```
-Angular (TypeScript + TailwindCSS)
-    ↕ REST + WebSocket
-FastAPI backend
-    ↕
-┌─────────────────────────────────────┐
-│  Orchestrator Agent (Gemini 2.5)    │
-│  ReAct loop + tool calling          │
-│  Tools:                             │
-│    extract_entities   [GLiNER]      │
-│    check_icmr_flags   [rule engine] │
-│    detect_trends      [ChromaDB]    │
-│    get_patient_history[ChromaDB]    │
-│    search_pubmed      [PubMed API]  │
-│    check_drug_safety  [OpenFDA API] │
-└──────────────┬──────────────────────┘
-               ↓ draft output
-┌─────────────────────────────────────┐
-│  Verification Agent (Gemini 2.5)    │
-│  Audits for hallucinated claims     │
-│  Corrects if needed                 │
-└──────────────┬──────────────────────┘
-               ↓ verified output
-PostgreSQL + ChromaDB storage
-```
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | Angular 18 + TypeScript + TailwindCSS |
-| Backend | FastAPI + SQLAlchemy |
-| Database | PostgreSQL |
-| Vector store | ChromaDB |
-| Agents | Gemini 2.5 Flash (tool calling) |
-| NER | GLiNER (zero-shot) |
-| OCR | EasyOCR + PyMuPDF |
-| External APIs | PubMed NCBI, OpenFDA |
-| Deployment | Docker Compose + Nginx |
-
----
-
-## Setup
-
-### 1. Get your Gemini API key (free)
-
-1. Go to https://aistudio.google.com
-2. Sign in with your Google account
-3. Click **Get API key → Create API key**
-4. Copy it
-
-### 2. Configure environment
+## Quick start (backend only, no Docker)
 
 ```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env and add your GEMINI_API_KEY
-```
-
-### 3. Run with Docker
-
-```bash
-docker-compose up --build
-```
-
-- Frontend: http://localhost:80
-- Backend API: http://localhost:8000
-- Swagger docs: http://localhost:8000/docs
-
-### 4. Run locally (without Docker)
-
-**Backend:**
-```bash
-cd backend
+cp .env.example .env
+# edit .env: set GEMINI_API_KEY, JWT_SECRET, API_KEY and BOOTSTRAP_CLINICIAN_* (see root README)
 python -m venv venv
-venv\Scripts\activate   # Windows
+source venv/bin/activate   # venv\Scripts\activate on Windows
 pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm start
-# Opens at http://localhost:4200
+Runs at `http://localhost:8000` — Swagger UI at `/docs`, health check at `/health`
+(the only unauthenticated endpoint besides `/auth/login`; everything else needs a Bearer token or `X-API-Key`).
+
+## Project layout
+
+```
+src/
+  agents/       orchestrator (ReAct + tool calling), summarizer, verifier (fail-closed)
+  api/          FastAPI app, routes, auth
+  db/           SQLAlchemy models + session
+  flagging/     ICMR rule engine + longitudinal intelligence (trend/baseline/forecast)
+  ingestion/    PDF text extraction (digital + OCR), Hindi transliteration
+  ner/          GLiNER-based medical entity extraction
+  security/     injection detection, de-identification, passwords, hash-chained audit log, rate limiting
+  evidence/     numeric grounding + evidence linking
+  interop/      FHIR R4 export
+  eval/         synthetic data + evaluation harness (outside src/)
+  tools/        agent tool registry + ChromaDB history store (incl. semantic search)
 ```
 
----
+## Testing a change locally
 
-## Novelty
+```bash
+pip install -r requirements-dev.txt
+python -m py_compile $(find . -name "*.py" -not -path "*/venv/*")
+python -m pytest -q                 # 195 tests; Gemini and the ML libraries are stubbed
+python -m eval.run_eval --check     # regenerates ../EVAL_RESULTS.md, fails on regression
+```
 
-- **Multi-agent**: Orchestrator (generates) + Verifier (audits) — same model, distinct roles
-- **ICMR reference ranges**: Indian-specific lab thresholds, not Western defaults
-- **Longitudinal trends**: Worsening patterns detected across visits via ChromaDB
-- **Real external tools**: PubMed for clinical evidence, OpenFDA for drug safety
-- **WebSocket streaming**: Live agent activity visible in the UI as it happens
-- **Explainable flags**: Every risk traces back to the violated ICMR guideline
-
----
-
-## Data Sources for Testing
-
-- MTSamples (https://mtsamples.com) — free de-identified medical transcripts
-- Synthea (https://github.com/synthetichealth/synthea) — synthetic patient records
+Add `--live` to `run_eval` (with `GEMINI_API_KEY` set) to measure the real Verifier.
+Test accounts used by the suite live in `tests/conftest.py`.
