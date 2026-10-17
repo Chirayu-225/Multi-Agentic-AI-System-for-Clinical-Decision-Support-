@@ -52,6 +52,22 @@ async def extract_entities(text: str) -> dict:
         used_chunks = chunks[:MAX_NER_CHUNKS]
         results = [_extract(c) for c in used_chunks]
         merged = merge_chunk_entities(results)
+
+        # Safety net: run the structured lab parser over the WHOLE document too, so a value
+        # split across a chunk boundary (or missed by a chunk) is never silently lost.
+        from src.ner.medical_ner import _extract_lab_values_regex
+        from src.flagging.risk_flagging import _canonical_name
+        labs = merged["lab_values"]
+        have = {_canonical_name(l["test"]) for l in labs if l.get("value") is not None}
+        for lab in _extract_lab_values_regex(text):
+            if _canonical_name(lab["test"]) not in have:
+                labs.append(lab)
+                have.add(_canonical_name(lab["test"]))
+        # drop value-less NER stubs ("Serum Creatinine") that now have a valued twin
+        merged["lab_values"] = [
+            l for l in labs
+            if l.get("value") is not None or _canonical_name(l["test"]) not in have
+        ]
         merged["truncated"] = len(chunks) > len(used_chunks)
         merged["chunks_processed"] = len(used_chunks)
         merged["chunks_total"] = len(chunks)

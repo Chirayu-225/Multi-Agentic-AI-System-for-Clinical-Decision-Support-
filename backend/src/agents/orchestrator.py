@@ -325,6 +325,13 @@ async def run_orchestrator(
 
     lab_values = entities.get("lab_values", [])
     gender = entities.get("patient", {}).get("gender")
+    if not any(l.get("value") is not None for l in lab_values):
+        # An empty flag list renders as "all clear". Never let "nothing was read" look
+        # like "everything is normal".
+        accumulated_data["ingestion_warnings"].append(
+            "No numeric lab values could be extracted from this document. The risk level "
+            "shown is NOT a statement that results are normal - review the source report."
+        )
 
     icmr_args = {"lab_values": lab_values, "gender": gender}
     icmr_result = await _execute_tool("check_icmr_flags", icmr_args)

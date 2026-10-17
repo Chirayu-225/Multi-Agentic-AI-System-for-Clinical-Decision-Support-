@@ -80,9 +80,20 @@ app = FastAPI(
     version=APP_VERSION,
 )
 
+# Allowed browser origins. Entries are trimmed (a stray space after a comma in .env used to
+# silently break matching). localhost / 127.0.0.1 on ANY port are also accepted so local
+# development works whichever way the dev server is opened; set
+# ALLOW_LOCALHOST_ORIGINS=false in production so only CORS_ORIGINS is trusted.
+_cors_origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "http://localhost:4200").split(",") if o.strip()]
+_localhost_regex = (
+    r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    if os.getenv("ALLOW_LOCALHOST_ORIGINS", "true").lower() != "false" else None
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:4200").split(","),
+    allow_origins=_cors_origins,
+    allow_origin_regex=_localhost_regex,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["X-API-Key", "Authorization", "Content-Type"],
 )
