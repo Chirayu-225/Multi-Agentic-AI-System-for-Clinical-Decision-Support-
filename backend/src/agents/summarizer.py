@@ -203,14 +203,21 @@ SECTION: LONGITUDINAL_NARRATIVE
     explained = []
     for i, f in enumerate(abnormal):
         m = re.search(rf"FLAG_{i}:\s*(.+)", flag_exps)
-        explained.append({**f, "explanation": m.group(1).strip() if m else ""})
+        explained.append({**f, "explanation": re.sub(r"\*\*|__", "", m.group(1)).strip() if m else ""})
 
     # Parse follow-up actions
+    def _plain(t: str) -> str:
+        # The UI shows its own numbering and renders text literally, so strip markdown
+        # emphasis and any "1." / "-" prefix the model added.
+        t = re.sub(r"\*\*|__", "", t)
+        return re.sub(r"^\s*(?:\d+[.)]|[-*\u2022])\s*", "", t).strip()
+
     actions = [
-        line.strip()
+        _plain(line)
         for line in followup.split("\n")
         if line.strip() and (line.strip()[0].isdigit() or line.strip().startswith("-"))
     ]
+    actions = [a for a in actions if a]
     if not actions:
         actions = [followup] if followup else ["Routine monitoring recommended."]
 

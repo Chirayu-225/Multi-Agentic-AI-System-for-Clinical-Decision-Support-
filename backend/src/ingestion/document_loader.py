@@ -272,13 +272,43 @@ def load_document(pdf_path: str) -> dict:
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[str]:
     """
     Split extracted text into overlapping chunks for NER and embedding.
+
+    Chunks are measured in words but built from whole, UNMODIFIED lines joined with
+    newlines. The lab-value parser is line- and spacing-sensitive ("Hemoglobin   10.2   g/dL"):
+    this function used to join every word with single spaces, which made it extract nothing
+    (or the wrong number) from real uploads - a report with high creatinine was shown as
+    "all clear". An over-long single line is split by words.
     """
-    words = text.split()
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = min(start + chunk_size, len(words))
-        chunk = " ".join(words[start:end])
-        chunks.append(chunk)
-        start += chunk_size - overlap
+    lines: list[tuple[str, int]] = []   # (raw line text, word count)
+    for raw in text.split("\n"):
+        raw = raw.rstrip()
+        n = len(raw.split())
+        if n == 0:
+            continue
+        if n <= chunk_size:
+            lines.append((raw, n))
+            continue
+        words = raw.split()
+        for i in range(0, n, chunk_size):
+            part = words[i:i + chunk_size]
+            lines.append((" ".join(part), len(part)))
+
+    chunks: list[str] = []
+    current: list[tuple[str, int]] = []
+    count = 0
+    for ln in lines:
+        if current and count + ln[1] > chunk_size:
+            chunks.append("\n".join(t for t, _ in current))
+            keep: list[tuple[str, int]] = []
+            kept = 0
+            for prev in reversed(current):
+                if kept + prev[1] > overlap:
+                    break
+                keep.insert(0, prev)
+                kept += prev[1]
+            current, count = keep, kept
+        current.append(ln)
+        count += ln[1]
+    if current:
+        chunks.append("\n".join(t for t, _ in current))
     return chunks

@@ -114,7 +114,15 @@ def extract_entities(text: str, threshold: float = 0.4) -> dict:
     # GLiNER works best on chunks under ~512 tokens
     # Truncate if needed
     if len(text.split()) > 400:
-        text = " ".join(text.split()[:400])
+        # keep line breaks: the lab parser below is line-based
+        kept, n = [], 0
+        for ln in text.split("\n"):
+            w = len(ln.split())
+            if n + w > 400:
+                break
+            kept.append(ln)
+            n += w
+        text = "\n".join(kept)
 
     raw = model.predict_entities(text, MEDICAL_LABELS, threshold=threshold)
 
@@ -156,6 +164,9 @@ def extract_entities(text: str, threshold: float = 0.4) -> dict:
             if text_val not in result["clinical"]["body_parts"]:
                 result["clinical"]["body_parts"].append(text_val)
         elif label == "medication":
+            # NER sometimes tags only the dosage-form prefix ("Tab", "Inj.") as a drug
+            if re.fullmatch(r"(tab|tabs|tablet|tablets|cap|caps|capsule|inj|injection|syp|syrup|drops|oint)\.?", text_val, re.I):
+                continue
             result["medications"].append({"name": text_val, "dosage": None})
         elif label == "dosage":
             # Attach dosage to the last medication if available
@@ -222,6 +233,11 @@ _COLON_RE = re.compile(
     rf"^(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s*:\s*(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})?", re.I)
 _DASH_RE = re.compile(
     rf"^(?P<test>[A-Za-z][A-Za-z0-9 /().%+]{{1,40}}?)\s+[-\u2013=]\s*(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})?", re.I)
+# Loose single-space row: "Hemoglobin 10.2 g/dL 13.0 - 17.0". Unit REQUIRED and the test name
+# is letters only, so ranges and stray numbers cannot be mistaken for a result.
+_LOOSE_RE = re.compile(
+    rf"^(?P<test>[A-Za-z][A-Za-z /().%+\-]{{1,40}}?)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})(?:\s|$)", re.I)
+_NUMBER_TOKEN = re.compile(r"(?:^|\s)\d+(?:[.,]\d+)?(?:\s|$)")
 _SENTENCE_RE = re.compile(
     rf"(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s+(?:was found to be|was measured at|was|is|of|measured|measures|came to|=)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})", re.I)
 
@@ -245,9 +261,13 @@ def _extract_lab_values_regex(text: str) -> list[dict]:
         if not line or len(line) > 200:
             continue
         m = None
-        for rx in (_COLON_RE, _DASH_RE, _TABLE_RE, _SENTENCE_RE):
-            m = rx.match(line) if rx is not _SENTENCE_RE else rx.search(line)
-            if m:
+        for rx in (_COLON_RE, _DASH_RE, _TABLE_RE, _LOOSE_RE, _SENTENCE_RE):
+            cand = rx.match(line) if rx is not _SENTENCE_RE else rx.search(line)
+            # A "test name" that contains a stand-alone number is really a result row that
+            # swallowed its own value ("Hemoglobin 10.2 g/dL 13.0 - 17.0" read by the dash
+            # pattern as test="Hemoglobin 10.2 g/dL 13.0", value=17.0). Reject and try the next layout.
+            if cand and not _NUMBER_TOKEN.search(cand.group("test")):
+                m = cand
                 break
         if not m:
             continue
@@ -269,6 +289,30 @@ def _extract_lab_values_regex(text: str) -> list[dict]:
         if test not in seen:
             seen.add(test)
             matches.append({"test": test, "value": value, "unit": unit})
+
+    # Layout 5: one cell per line (common when a PDF table is extracted):
+    #   Hemoglobin / 10.2 / g/dL / 13.0 - 17.0.   A recognised unit on the line after the
+    #   number is REQUIRED here, which keeps this pass from picking up stray numbers.
+    lines = [l.strip() for l in text.split("\n")]
+    lines = [l for l in lines if l]
+    num_only = re.compile(rf"^(?P<value>{_NUM})$")
+    unit_only = re.compile(rf"^(?P<unit>{_UNIT_ALT})$", re.I)
+    for i in range(len(lines) - 2):
+        name = lines[i]
+        if not (2 <= len(name) <= 40) or not re.match(r"^[A-Za-z][A-Za-z0-9 /().%+\-]*$", name):
+            continue
+        mv, mu = num_only.match(lines[i + 1]), unit_only.match(lines[i + 2])
+        if not (mv and mu) or _NON_LAB_LABELS.search(name):
+            continue
+        test = _clean_lab_name(name)
+        if not test or test in _NOISE_WORDS or test in seen:
+            continue
+        try:
+            value = _parse_number(mv.group("value"))
+        except ValueError:
+            continue
+        seen.add(test)
+        matches.append({"test": test, "value": value, "unit": mu.group("unit")})
     return matches
 
 
