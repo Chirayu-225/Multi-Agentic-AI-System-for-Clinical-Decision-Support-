@@ -1,0 +1,17 @@
+# Never bake secrets, patient data or local environments into the image.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+med/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+eval/results/

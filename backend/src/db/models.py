@@ -60,6 +60,13 @@ class Report(Base):
     reviewed_by   = Column(String)
     reviewed_at   = Column(DateTime)
     review_note   = Column(Text)
+    # Review detail (all nullable so existing databases auto-migrate, see db/session.py).
+    # When a clinician edits a summary before approving, the model's original text is kept
+    # here and the edited text becomes clinical_summary/patient_summary.
+    ai_clinical_summary   = Column(Text)
+    ai_patient_summary    = Column(Text)
+    review_edited         = Column(Boolean)   # True if the clinician changed either summary
+    warnings_acknowledged = Column(Boolean)   # True if approved with warnings explicitly accepted
     uploaded_by   = Column(String)
 
     # ── Grounding / interactions / translation ─────────────────────────────
@@ -92,6 +99,7 @@ class AgentRun(Base):
     caller_fingerprint = Column(String)
     duration_ms  = Column(Integer)   # wall-clock for the whole pipeline
     llm_calls    = Column(Integer)   # Gemini round trips made for this report
+    model        = Column(String)    # exact model id that produced this run (see src/llm.py)
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 

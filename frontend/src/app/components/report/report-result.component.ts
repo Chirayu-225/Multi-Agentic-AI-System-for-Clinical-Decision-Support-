@@ -37,6 +37,47 @@ import { EvidencePanelComponent } from './evidence-panel.component';
                   Awaiting clinician approval — hidden from the patient
                 </p>
                 @if (canReview) {
+                  @if (rv.requires_acknowledgement?.length) {
+                    <div class="mt-3 rounded-lg border border-amber-500/40 bg-gray-950/60 p-3">
+                      <p class="text-xs font-semibold text-amber-300 uppercase tracking-wider mb-2">
+                        Check before releasing ({{ rv.requires_acknowledgement!.length }})
+                      </p>
+                      <ul class="space-y-1 text-sm text-gray-300 list-disc pl-5">
+                        @for (w of rv.requires_acknowledgement; track $index) { <li>{{ w }}</li> }
+                      </ul>
+                      <label class="flex items-start gap-2 mt-3 text-sm text-gray-200 cursor-pointer">
+                        <input type="checkbox" [(ngModel)]="ack" class="mt-0.5 accent-amber-500" />
+                        <span>I have checked these against the source report and accept them.</span>
+                      </label>
+                    </div>
+                  }
+
+                  <button type="button" (click)="toggleEdit(r)"
+                          class="mt-3 text-xs font-semibold text-blue-300 hover:text-blue-200 underline underline-offset-2">
+                    {{ editing() ? 'Discard edits' : 'Edit summaries before approving' }}
+                  </button>
+                  @if (editing()) {
+                    <label for="edit-clin-{{ r.report_id }}"
+                           class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mt-3 mb-1.5">
+                      Clinical summary
+                    </label>
+                    <textarea id="edit-clin-{{ r.report_id }}" rows="5" maxlength="5000"
+                              [(ngModel)]="editClinical"
+                              class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                                     text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-1
+                                     focus:ring-blue-500"></textarea>
+                    <label for="edit-pat-{{ r.report_id }}"
+                           class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mt-3 mb-1.5">
+                      Patient summary <span class="normal-case font-normal text-gray-500">(this is what the patient will read)</span>
+                    </label>
+                    <textarea id="edit-pat-{{ r.report_id }}" rows="4" maxlength="5000"
+                              [(ngModel)]="editPatient"
+                              class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                                     text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-1
+                                     focus:ring-blue-500"></textarea>
+                    <p class="text-xs text-gray-500 mt-1">The AI's original text is kept alongside your version.</p>
+                  }
+
                   <label for="review-note-{{ r.report_id }}"
                          class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mt-3 mb-1.5">
                     Note <span class="normal-case font-normal text-gray-500">(required to reject, at least 3 characters)</span>
@@ -47,11 +88,12 @@ import { EvidencePanelComponent } from './evidence-panel.component';
                                    text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-1
                                    focus:ring-blue-500"></textarea>
                   <div class="flex flex-wrap gap-2 mt-3">
-                    <button type="button" (click)="submitReview('approve')" [disabled]="busy()"
+                    <button type="button" (click)="submitReview('approve')"
+                            [disabled]="busy() !== null || (!!rv.requires_acknowledgement?.length && !ack)"
                             class="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600
                                    hover:bg-emerald-500 text-white transition-colors disabled:opacity-40
                                    disabled:cursor-not-allowed">
-                      {{ busy() === 'approve' ? 'Approving...' : 'Approve' }}
+                      {{ busy() === 'approve' ? 'Approving...' : (hasEdits(r) ? 'Approve with edits' : 'Approve') }}
                     </button>
                     <button type="button" (click)="submitReview('reject')"
                             [disabled]="busy() !== null || note.trim().length < 3"
@@ -72,6 +114,8 @@ import { EvidencePanelComponent } from './evidence-panel.component';
                 <p class="text-sm font-semibold text-emerald-300">
                   Approved by {{ rv.reviewed_by || 'a clinician' }}
                   @if (rv.reviewed_at) { on {{ rv.reviewed_at | date:'medium' }} }
+                  @if (rv.edited) { · summaries edited by the clinician }
+                  @if (rv.warnings_acknowledged) { · warnings acknowledged }
                 </p>
                 @if (rv.note) { <p class="text-xs text-emerald-200/80 mt-1">{{ rv.note }}</p> }
               </div>
@@ -318,6 +362,12 @@ import { EvidencePanelComponent } from './evidence-panel.component';
                 }
               </div>
               <p class="text-gray-300 text-sm leading-relaxed">{{ r.llm_output.clinical_summary }}</p>
+              @if (r.llm_output.ai_original?.clinical_summary; as orig) {
+                <details class="mt-3 text-xs text-gray-500">
+                  <summary class="cursor-pointer select-none">AI's original text (before clinician edit)</summary>
+                  <p class="mt-2 leading-relaxed">{{ orig }}</p>
+                </details>
+              }
             </div>
 
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest
@@ -418,6 +468,10 @@ export class ReportResultComponent {
   fhirBusy = signal(false);
   fhirError = signal<string | null>(null);
   note = '';
+  ack = false;
+  editing = signal(false);
+  editClinical = '';
+  editPatient = '';
 
   @Input({ required: true }) set report(v: ReportAnalysis) {
     this.data.set(v);
@@ -426,6 +480,24 @@ export class ReportResultComponent {
     this.reviewError.set(null);
     this.fhirError.set(null);
     this.note = '';
+    this.ack = false;
+    this.editing.set(false);
+  }
+
+  toggleEdit(r: ReportAnalysis): void {
+    if (this.editing()) {
+      this.editing.set(false);
+      return;
+    }
+    this.editClinical = r.llm_output.clinical_summary ?? '';
+    this.editPatient = r.llm_output.patient_summary ?? '';
+    this.editing.set(true);
+  }
+
+  hasEdits(r: ReportAnalysis): boolean {
+    return this.editing() && (
+      this.editClinical.trim() !== (r.llm_output.clinical_summary ?? '').trim() ||
+      this.editPatient.trim() !== (r.llm_output.patient_summary ?? '').trim());
   }
 
   abnormalFlags = computed(() =>
@@ -464,17 +536,44 @@ export class ReportResultComponent {
     const note = this.note.trim();
     if (decision === 'reject' && note.length < 3) return;
 
+    const editing = decision === 'approve' && this.editing();
+    const clin = editing ? this.editClinical.trim() : null;
+    const pat = editing ? this.editPatient.trim() : null;
+
     this.busy.set(decision);
     this.reviewError.set(null);
-    this.api.reviewReport(r.report_id, decision, note).subscribe({
+    this.api.reviewReport(r.report_id, decision, note, {
+      acknowledgeWarnings: this.ack,
+      editedClinicalSummary: clin,
+      editedPatientSummary: pat,
+    }).subscribe({
       next: (res) => {
+        const edited = res.edited ?? [];
+        if (edited.length) {
+          const orig = { clinical_summary: r.llm_output.clinical_summary,
+                         patient_summary: r.llm_output.patient_summary };
+          this.data.set({
+            ...r,
+            llm_output: {
+              ...r.llm_output,
+              clinical_summary: edited.includes('clinical_summary') && clin ? clin : r.llm_output.clinical_summary,
+              patient_summary: edited.includes('patient_summary') && pat ? pat : r.llm_output.patient_summary,
+              translation: edited.includes('patient_summary') ? null : r.llm_output.translation,
+              ai_original: r.llm_output.ai_original ?? orig,
+            },
+          });
+        }
         this.review.set({
           status: res.status,
           reviewed_by: res.reviewed_by,
           reviewed_at: res.reviewed_at,
           note: note || null,
+          edited: edited.length > 0,
+          warnings_acknowledged: res.status === 'approved' && !!this.review()?.requires_acknowledgement?.length,
+          requires_acknowledgement: [],
         });
         this.busy.set(null);
+        this.editing.set(false);
         this.note = '';
         this.reviewState.refresh();
         this.reviewed.emit(res.status);

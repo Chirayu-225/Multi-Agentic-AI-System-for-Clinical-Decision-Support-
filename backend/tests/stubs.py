@@ -29,10 +29,11 @@ def _mod(name: str, **attrs):
 
 
 def install_stubs() -> None:
-    if _missing("google.generativeai"):
-        genai = _mod("google.generativeai", configure=lambda **k: None, GenerativeModel=Anything, protos=Anything())
+    if _missing("google.genai"):
+        genai = _mod("google.genai", Client=Anything, types=Anything())
+        _mod("google.genai.types")
         if "google" in sys.modules:
-            sys.modules["google"].generativeai = genai
+            sys.modules["google"].genai = genai
     if _missing("easyocr"):
         _mod("easyocr", Reader=Anything)
     if _missing("chromadb"):

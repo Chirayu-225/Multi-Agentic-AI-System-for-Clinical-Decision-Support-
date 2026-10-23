@@ -75,23 +75,33 @@ async def extract_entities(text: str) -> dict:
     except Exception as e:
         import traceback
         print(f"[TOOL ERROR] extract_entities failed: {traceback.format_exc()}")
-        # Return minimal structure so pipeline continues
+        # The NER model (GLiNER) failed — typically it could not be downloaded on first run,
+        # or the host is offline. The structured lab parser needs no model, so still run it:
+        # losing every lab value because NER is down turned a fully readable report into
+        # "no values could be extracted".
+        labs = []
+        try:
+            from src.ner.medical_ner import _extract_lab_values_regex
+            labs = _extract_lab_values_regex(text)
+        except Exception:  # noqa: BLE001
+            print(f"[TOOL ERROR] lab parser also failed: {traceback.format_exc()}")
         return {
             "patient": {"name": None, "age": None, "gender": None},
             "clinical": {"diagnoses": [], "symptoms": [], "procedures": [], "body_parts": []},
             "medications": [],
-            "lab_values": [],
+            "lab_values": labs,
             "dates": [],
             "providers": {"doctor": None, "hospital": None},
             "raw_entities": [],
             "truncated": False,
             "chunks_processed": 0,
             "chunks_total": 0,
-            "error": str(e),
+            "error": f"{type(e).__name__}: {e}",
+            "ner_unavailable": True,
         }
 
 
-async def check_icmr_flags(lab_values: list[dict], gender: str = None) -> dict:
+async def check_icmr_flags(lab_values: list[dict], gender: str = None, age=None) -> dict:
     """
     Check lab values against ICMR Indian reference ranges.
     Returns rule_flags with severity levels (NORMAL/MODERATE/HIGH/CRITICAL).
@@ -106,7 +116,7 @@ async def check_icmr_flags(lab_values: list[dict], gender: str = None) -> dict:
     be missing a layer depending on tool-call order.
     """
     from src.flagging.risk_flagging import flag_lab_values
-    flags = flag_lab_values(lab_values, gender=gender)
+    flags = flag_lab_values(lab_values, gender=gender, age=age)
     return {
         "flags": [{**f, "severity": str(f["severity"])} for f in flags],
     }
@@ -302,7 +312,11 @@ TOOL_DEFINITIONS = [
                 },
                 "gender": {
                     "type": "string",
-                    "description": "Patient gender for range selection (Male or Female)",
+                    "description": "Patient sex for range selection (M/F/Male/Female)",
+                },
+                "age": {
+                    "type": "number",
+                    "description": "Patient age in years, for paediatric/elderly ranges",
                 },
             },
             "required": ["lab_values"],

@@ -25,10 +25,8 @@ from pathlib import Path
 from typing import Literal
 
 # Load .env by an explicit path next to this file, before any of the
-# src.* imports below — several of them (src.agents.orchestrator,
-# summarizer, verifier) read GEMINI_API_KEY at MODULE IMPORT TIME to
-# configure the Gemini client, so .env must be loaded before those imports
-# run, not just before the imports are used.
+# src.* imports below — src/llm.py reads GEMINI_MODEL at import time, so
+# .env must be loaded before those imports run.
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
@@ -47,7 +45,8 @@ from src.agents.orchestrator import run_orchestrator
 from src.agents.summarizer import generate_summaries
 from src.agents.verifier import verify_and_correct
 from src.agents.translator import (LANGUAGES, is_supported, translate_patient_summary)
-from src.tools.history_store import store_report as chroma_store
+from src.tools.history_store import (store_report as chroma_store, delete_patient_history,
+                                     delete_report_history)
 from src.tools.trend_series import build_trend_series
 from src.api import auth as authmod
 from src.api.auth import (Principal, ROLE_CLINICIAN, ROLE_PATIENT, ROLE_SERVICE,
@@ -338,9 +337,15 @@ def _report_full(r: Report, db: Session) -> dict:
         "evidence": r.evidence or [],
         "disclaimer": AI_DISCLAIMER,
         "review": {"status": _effective_status(r), "reviewed_by": r.reviewed_by,
-                   "reviewed_at": _iso(r.reviewed_at), "note": r.review_note},
+                   "reviewed_at": _iso(r.reviewed_at), "note": r.review_note,
+                   "edited": bool(r.review_edited),
+                   "warnings_acknowledged": bool(r.warnings_acknowledged),
+                   "requires_acknowledgement": _review_warnings(r)},
         "llm_output": {
             "clinical_summary": r.clinical_summary, "patient_summary": r.patient_summary,
+            "ai_original": ({"clinical_summary": r.ai_clinical_summary,
+                             "patient_summary": r.ai_patient_summary}
+                            if r.review_edited else None),
             "explained_flags": r.explained_flags or [], "followup_actions": r.followup_actions or [],
             "longitudinal_narrative": r.longitudinal_narrative or "",
             "translation": {"language": r.translation_language, "text": r.patient_summary_translated,
@@ -686,14 +691,26 @@ async def upload_report(
             was_corrected=str(verified["clinical_corrected"] or verified["patient_corrected"]),
             caller_fingerprint=caller_fp,
             duration_ms=int((time.monotonic() - started) * 1000), llm_calls=llm_calls,
+            model=(agent_data.get("token_usage") or {}).get("model"),
         ))
         db.commit()
 
         # ── Step 6: Store in ChromaDB for longitudinal tracking ─────────────
-        chroma_store(
-            patient_id=patient_id, report_text=raw_text, lab_values=lab_values,
-            report_date=clean_date, filename=filename,
-        )
+        # Redacted copy only: names, phone numbers, MRNs etc. never reach the vector store.
+        # The report is already saved above, so a failure here must not become a 500 — the
+        # clinician would re-upload and create a duplicate. Record it on the report instead.
+        try:
+            chroma_store(
+                patient_id=patient_id, report_text=redact(raw_text, redaction_map), lab_values=lab_values,
+                report_date=clean_date, report_id=report_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("History store write failed report_id=%s", report_id)
+            report.ingestion_warnings = list(report.ingestion_warnings or []) + [
+                f"This report could not be added to the patient's history ({type(e).__name__}), "
+                f"so it will not appear in future trend or baseline checks."
+            ]
+            db.commit()
 
         audit.record(actor=principal.subject, role=principal.role, action="report.upload",
                      resource=f"report:{report_id}", ip=ip,
@@ -731,6 +748,25 @@ async def upload_report(
 class ReviewIn(BaseModel):
     decision: Literal["approve", "reject"]
     note: str = Field(default="", max_length=1000)
+    # Approve-with-edits: the clinician's corrected text replaces the model's (which is kept).
+    edited_clinical_summary: str | None = Field(default=None, max_length=5000)
+    edited_patient_summary: str | None = Field(default=None, max_length=5000)
+    # Required when the report carries any warning (see _review_warnings).
+    acknowledge_warnings: bool = False
+
+
+def _review_warnings(r: Report) -> list[str]:
+    """Everything a clinician must explicitly accept before a report can be released.
+    Without this gate the warnings were logged but approval was one click either way —
+    the shape that turns review into rubber-stamping."""
+    ver = r.verification or {}
+    out = []
+    if ver.get("clinical_unverified") or ver.get("patient_unverified"):
+        out.append("The AI Verifier could not run: the summaries have NOT been audited.")
+    out += [f"Grounding: {w}" for w in (r.grounding_warnings or [])]
+    out += [f"Security: {w}" for w in (r.security_warnings or [])]
+    out += [f"Extraction: {w}" for w in (r.ingestion_warnings or [])]
+    return out
 
 
 @app.post("/report/{report_id}/review")
@@ -747,19 +783,51 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
 
     previous = _effective_status(r)
     new_status = "approved" if body.decision == "approve" else "rejected"
+    warnings = _review_warnings(r)
+    if body.decision == "approve" and warnings and not body.acknowledge_warnings:
+        raise HTTPException(409, detail={
+            "message": "This report has warnings that must be acknowledged before it can be released.",
+            "warnings": warnings,
+        })
+
+    edits = {}
+    if body.decision == "approve":
+        for field, new in (("clinical_summary", body.edited_clinical_summary),
+                           ("patient_summary", body.edited_patient_summary)):
+            if new is not None and new.strip() and new.strip() != (getattr(r, field) or "").strip():
+                edits[field] = new.strip()
     # Audit FIRST and fail closed: a release decision that cannot be recorded must not happen.
     audit.record(actor=principal.subject, role=principal.role, action=f"report.{body.decision}",
                  resource=f"report:{report_id}", ip=_ip(request), critical=True,
                  detail={"patient_id": r.patient_id, "previous_status": previous,
                          "had_security_warnings": bool(r.security_warnings),
-                         "had_grounding_warnings": bool(r.grounding_warnings)})
+                         "had_grounding_warnings": bool(r.grounding_warnings),
+                         "warnings": len(warnings), "edited": sorted(edits)})
+    if new_status == "rejected":
+        # A rejected report must not keep shaping this patient's trends and baselines.
+        try:
+            delete_report_history(r.patient_id, report_id)
+        except Exception:
+            logger.exception("Could not remove rejected report %s from history store", report_id)
+    if edits:
+        r.ai_clinical_summary = r.ai_clinical_summary or r.clinical_summary
+        r.ai_patient_summary = r.ai_patient_summary or r.patient_summary
+        for field, new in edits.items():
+            setattr(r, field, new)
+        if "patient_summary" in edits and r.patient_summary_translated:
+            # The translation was of the model's text; it no longer matches what was approved.
+            r.patient_summary_translated = None
+            r.translation_language = None
+            r.translation_check = None
+    r.review_edited = bool(edits) if body.decision == "approve" else None
+    r.warnings_acknowledged = bool(warnings) and body.decision == "approve"
     r.review_status = new_status
     r.reviewed_by = principal.subject
     r.reviewed_at = datetime.utcnow()
     r.review_note = body.note.strip() or None
     db.commit()
     return {"report_id": report_id, "status": new_status, "reviewed_by": principal.subject,
-            "reviewed_at": _iso(r.reviewed_at)}
+            "reviewed_at": _iso(r.reviewed_at), "edited": sorted(edits)}
 
 
 @app.get("/reviews/pending")
@@ -914,9 +982,16 @@ def delete_patient(patient_id: str, request: Request, db: Session = Depends(get_
     if not patient:
         raise HTTPException(404, "Patient not found.")
     n_reports = len(patient.reports)
+    # Erase the vector-store copy FIRST. If that fails, nothing is deleted and the caller
+    # gets an error — never a "deleted" response while report text survives elsewhere.
+    try:
+        vectors_cleared = delete_patient_history(patient_id)
+    except Exception:
+        logger.exception("Erasure failed in history store for patient_id=%s", patient_id)
+        raise HTTPException(500, "Erasure could not complete (history store). Nothing was deleted; retry.")
     audit.record(actor=principal.subject, role=principal.role, action="patient.delete",
                  resource=f"patient:{patient_id}", ip=_ip(request), critical=True,
-                 detail={"reports_deleted": n_reports})
+                 detail={"reports_deleted": n_reports, "history_store_cleared": vectors_cleared})
     db.delete(patient)
     db.commit()
     logger.warning("Patient record deleted: patient_id=%s by=%s", patient_id, principal.subject)
@@ -949,8 +1024,25 @@ def metrics(db: Session = Depends(get_db),
         with_grounding += bool(r.grounding_warnings)
         with_interactions += bool((r.drug_interactions or {}).get("interactions"))
 
+    # ── Product: is review real, and is the tool saving clinicians time? ──────────
+    # approve_without_edit_rate high AND minutes_to_review very low is the rubber-stamp
+    # signature (automation bias); a high edit rate means the summaries aren't good enough yet.
+    reviewed = [r for r in reports if _effective_status(r) in ("approved", "rejected") and r.reviewed_at]
+    approved = [r for r in reviewed if _effective_status(r) == "approved"]
+    edited = sum(1 for r in approved if r.review_edited)
+    review_minutes = sorted(
+        (r.reviewed_at - r.created_at).total_seconds() / 60
+        for r in reviewed if r.created_at and r.reviewed_at >= r.created_at)
+
+    def _q(xs, q):
+        return round(xs[int(q * (len(xs) - 1))], 1) if xs else None
+
     durations = [x.duration_ms for x in runs if x.duration_ms]
     llm = [x.llm_calls for x in runs if x.llm_calls]
+    models_used: dict[str, int] = {}
+    for x in runs:
+        if x.model:
+            models_used[x.model] = models_used.get(x.model, 0) + 1
     tools = [len(x.tool_calls or []) for x in runs]
 
     events = db.query(AuditEvent).filter(AuditEvent.ts >= day_ago.isoformat()).all()
@@ -978,6 +1070,18 @@ def metrics(db: Session = Depends(get_db),
             "p95_duration_ms": sorted(durations)[int(0.95 * (len(durations) - 1))] if durations else None,
             "avg_llm_calls": round(sum(llm) / len(llm), 2) if llm else None,
             "avg_tool_calls": round(sum(tools) / len(tools), 2) if tools else None,
+            "models": models_used,
+        },
+        "review": {
+            "reviewed": len(reviewed),
+            "approve_without_edit_rate": _rate(len(approved) - edited, len(approved)),
+            "edit_rate": _rate(edited, len(approved)),
+            "rejection_rate": _rate(len(reviewed) - len(approved), len(reviewed)),
+            "approved_with_acknowledged_warnings": sum(1 for r in approved if r.warnings_acknowledged),
+            "median_minutes_to_review": _q(review_minutes, 0.5),
+            "p90_minutes_to_review": _q(review_minutes, 0.9),
+            "note": ("Time to review is upload-to-decision, so it includes queue wait. A very high "
+                     "approve-without-edit rate with very short review times suggests rubber-stamping."),
         },
         "safety": {
             "verifier_correction_rate": _rate(corrected, n),

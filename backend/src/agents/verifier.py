@@ -10,7 +10,7 @@ Distinct from the Orchestrator in:
   - Authority: can reject and trigger correction of the orchestrator's output
   - System prompt: adversarial perspective, looking for unsupported claims
 
-Same model (gemini-2.5-flash), different agent identity.
+Same pinned model (src/llm.py), different agent identity.
 
 Both summaries (clinical + patient) are audited in a SINGLE Gemini call, not two
 sequential ones. They used to run as separate calls with an artificial 5s sleep between
@@ -18,18 +18,12 @@ them purely to avoid tripping the rate limit — auditing both in one prompt rem
 call and the sleep, since there's nothing left to space out.
 """
 
-import os
 import re
-import json
-import asyncio
-import time
 
-import google.generativeai as genai
+from src.llm import generate_text, is_rate_limit
 
 from src.security.deidentification import redact
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 VERIFIER_SYSTEM_PROMPT = """You are a clinical verification agent. Your ONLY job is to audit
 AI-generated medical summaries for factual accuracy against ground-truth extracted data.
@@ -72,10 +66,13 @@ def _build_ground_truth(entities: dict, flags: list, trend_flags: list,
     patient = entities.get("patient", {})
     if patient.get("name"):
         lines.append(f"Patient: {redact(patient['name'], redaction_map)}")
-    if patient.get("age"):
+    age = patient.get("age_years")
+    if age is not None:
+        lines.append(f"Age: {age:g}" if age >= 1 else f"Age: {round(age * 12)} months")
+    elif patient.get("age"):
         lines.append(f"Age: {patient['age']}")
-    if patient.get("gender"):
-        lines.append(f"Gender: {patient['gender']}")
+    if patient.get("sex") or patient.get("gender"):
+        lines.append(f"Sex: {patient.get('sex') or patient.get('gender')}")
 
     diagnoses = entities.get("clinical", {}).get("diagnoses", [])
     if diagnoses:
@@ -167,11 +164,6 @@ async def verify_and_correct(
             patient_issues: str,
         }
     """
-    model = genai.GenerativeModel(
-        model_name=MODEL,
-        system_instruction=VERIFIER_SYSTEM_PROMPT,
-    )
-
     ground_truth = _build_ground_truth(entities, flags, trend_flags, redaction_map, drug_interactions)
 
     prompt = f"""GROUND TRUTH DATA (the only facts that exist in this patient's report):
@@ -206,33 +198,25 @@ conditions, or medications NOT present in the ground truth?"""
             "patient": {**side, "final_summary": patient_summary},
         }
 
-    parsed = None
-    for attempt in range(3):
-        try:
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            text = response.text.strip()
-            parsed = {
-                "clinical": _parse_side(text, "CLINICAL", clinical_summary),
-                "patient": _parse_side(text, "PATIENT", patient_summary),
-            }
-            break
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 35 * (attempt + 1)
-                print(f"[VERIFIER] Rate limited, waiting {wait}s...")
-                await asyncio.sleep(wait)
-            else:
-                print(f"[VERIFIER] Error: {e}")
-                parsed = _unverified(
-                    f"Verification could not run: {type(e).__name__}. "
-                    f"This summary has NOT been audited — review manually."
-                )
-                break
-    if parsed is None:
-        parsed = _unverified(
-            "Verification could not run (rate limit exhausted after retries). "
-            "This summary has NOT been audited — review manually."
-        )
+    try:
+        text = await generate_text(prompt, system_instruction=VERIFIER_SYSTEM_PROMPT,
+                                   label="VERIFIER")
+        parsed = {
+            "clinical": _parse_side(text, "CLINICAL", clinical_summary),
+            "patient": _parse_side(text, "PATIENT", patient_summary),
+        }
+    except Exception as e:  # noqa: BLE001 - every failure fails CLOSED
+        if is_rate_limit(e):
+            parsed = _unverified(
+                "Verification could not run (rate limit exhausted after retries). "
+                "This summary has NOT been audited — review manually."
+            )
+        else:
+            print(f"[VERIFIER] Error: {type(e).__name__}")
+            parsed = _unverified(
+                f"Verification could not run: {type(e).__name__}. "
+                f"This summary has NOT been audited — review manually."
+            )
 
     clinical_result = parsed["clinical"]
     patient_result = parsed["patient"]

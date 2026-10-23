@@ -36,6 +36,19 @@ import { SeverityService } from '../../services/severity.service';
           </span>
         </div>
         <p class="text-sm text-gray-400 leading-relaxed">{{ flag!.message }}</p>
+        @if (flag!.range_basis || flag!.lab_range) {
+          <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+            @if (flag!.range_basis) {
+              <span>ICMR: {{ flag!.range_basis }}</span>
+            }
+            @if (flag!.lab_range; as lr) {
+              <span [class.text-amber-400]="flag!.range_discordant" [class.font-semibold]="flag!.range_discordant">
+                Lab's range: {{ lr.min ?? '—' }}–{{ lr.max ?? '—' }} {{ lr.unit }}
+                @if (flag!.range_discordant) { · disagrees with ICMR }
+              </span>
+            }
+          </div>
+        }
         @if (flag!.explanation) {
           <div class="mt-3 pt-3 border-t border-gray-800 text-xs text-gray-500 italic leading-relaxed">
             ↳ {{ flag!.explanation }}

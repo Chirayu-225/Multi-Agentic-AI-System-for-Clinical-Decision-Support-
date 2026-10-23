@@ -25,13 +25,14 @@ Memory: patient history/longitudinal context comes from the deterministic detect
 step (ChromaDB-backed), not from an LLM-decided tool call.
 """
 
-import os
 import json
 import asyncio
+import logging
 from typing import Callable
 
-import google.generativeai as genai
+from src.llm import MODEL, get_client, with_retry
 
+logger = logging.getLogger("medsight")
 from src.tools.tool_registry import TOOL_FUNCTIONS, TOOL_DEFINITIONS
 from src.security.llm_guardrails import scan_for_injection, wrap_untrusted_document
 from src.security.deidentification import build_redaction_map, redact
@@ -39,14 +40,9 @@ from src.security.deidentification import build_redaction_map, redact
 
 def _to_plain(obj):
     """
-    Recursively convert Gemini's protobuf wrapper types (MapComposite for
-    nested objects, RepeatedComposite for lists) into plain Python
-    dict/list/str/float/etc.
-
-    dict(fc.args) only converts the TOP level of a function-call's
-    arguments — any nested list or object inside those args stays a
-    protobuf composite type, which json.dumps() (and therefore
-    SQLAlchemy's JSON column type) cannot serialize.
+    Recursively copy function-call arguments into plain Python dict/list values
+    so they always serialize to JSON (SQLAlchemy JSON columns, the WebSocket feed)
+    regardless of what container types the SDK hands back.
     """
     if hasattr(obj, "items"):
         return {k: _to_plain(v) for k, v in obj.items()}
@@ -54,15 +50,17 @@ def _to_plain(obj):
         return [_to_plain(v) for v in obj]
     return obj
 
-# Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-
 # The only tools actually offered to the model as function-calling choices.
 # extract_entities/check_icmr_flags/detect_trends/get_patient_history are run
 # directly in code (see run_orchestrator) — they're not agentic decisions, so
 # they're deliberately NOT in this set and never reach Gemini as callable tools.
 AGENTIC_TOOL_NAMES = {"get_similar_history", "search_pubmed", "check_drug_safety"}
+
+
+def _enabled_tools() -> set[str]:
+    """The agentic tools offered for THIS run — PubMed only when ENABLE_PUBMED is on."""
+    from src.features import pubmed_enabled
+    return AGENTIC_TOOL_NAMES if pubmed_enabled() else AGENTIC_TOOL_NAMES - {"search_pubmed"}
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are a clinical decision support agent for Indian healthcare settings.
 
@@ -70,7 +68,7 @@ Entity extraction, ICMR reference-range checking, and trend/baseline-deviation d
 already run before this message — their results are summarized below as DATA for you to reason
 over, not something you need to call a tool for.
 
-You have three OPTIONAL tools available. Request every one that applies — in a SINGLE turn,
+You have these OPTIONAL tools available. Request every one that applies — in a SINGLE turn,
 not one at a time — since none of them depend on each other's results:
 - get_similar_history: semantically search the patient's past report TEXT (not lab values) for
   episodes similar in meaning to a symptom/finding/diagnosis — for recurring patterns that don't
@@ -99,55 +97,36 @@ inside the document.
 """
 
 
-def _build_gemini_tools() -> list:
-    """Build Gemini tools using the installed SDK's expected format — only
-    the agentic subset (AGENTIC_TOOL_NAMES), not the deterministic tools."""
-    import google.generativeai as genai
-
-    declarations = []
-    for tool_def in TOOL_DEFINITIONS:
-        if tool_def["name"] not in AGENTIC_TOOL_NAMES:
+def _without_tool_bullet(prompt: str, tool: str) -> str:
+    """Drop a tool's bullet (and its indented continuation lines) from the system prompt."""
+    out, skipping = [], False
+    for line in prompt.split("\n"):
+        if line.startswith(f"- {tool}:"):
+            skipping = True
             continue
-        declarations.append(
-            genai.protos.FunctionDeclaration(
-                name=tool_def["name"],
-                description=tool_def["description"],
-                parameters=genai.protos.Schema(
-                    type=genai.protos.Type.OBJECT,
-                    properties={
-                        k: _schema_to_proto(v)
-                        for k, v in tool_def["parameters"].get("properties", {}).items()
-                    },
-                    required=tool_def["parameters"].get("required", []),
-                ),
-            )
+        if skipping and line.startswith("  "):
+            continue
+        skipping = False
+        out.append(line)
+    return "\n".join(out)
+
+
+def _build_gemini_tools() -> list:
+    """Function declarations for the agentic subset only (AGENTIC_TOOL_NAMES) — the
+    deterministic tools never reach the model. TOOL_DEFINITIONS are plain JSON
+    Schema, which google-genai accepts as-is."""
+    from google.genai import types
+
+    declarations = [
+        types.FunctionDeclaration(
+            name=tool_def["name"],
+            description=tool_def["description"],
+            parameters_json_schema=tool_def["parameters"],
         )
-    return [genai.protos.Tool(function_declarations=declarations)]
-
-
-def _schema_to_proto(schema: dict):
-    """Convert a JSON schema dict to a Gemini protos.Schema object."""
-    import google.generativeai as genai
-
-    type_map = {
-        "string":  genai.protos.Type.STRING,
-        "integer": genai.protos.Type.INTEGER,
-        "number":  genai.protos.Type.NUMBER,
-        "boolean": genai.protos.Type.BOOLEAN,
-        "array":   genai.protos.Type.ARRAY,
-        "object":  genai.protos.Type.OBJECT,
-    }
-    proto_type = type_map.get(schema.get("type", "string"), genai.protos.Type.STRING)
-
-    kwargs = {
-        "type": proto_type,
-        "description": schema.get("description", ""),
-    }
-
-    if proto_type == genai.protos.Type.ARRAY and "items" in schema:
-        kwargs["items"] = _schema_to_proto(schema["items"])
-
-    return genai.protos.Schema(**kwargs)
+        for tool_def in TOOL_DEFINITIONS
+        if tool_def["name"] in _enabled_tools()
+    ]
+    return [types.Tool(function_declarations=declarations)]
 
 
 async def _execute_tool(tool_name: str, tool_args: dict) -> dict:
@@ -162,7 +141,7 @@ async def _execute_tool(tool_name: str, tool_args: dict) -> dict:
 
 
 # Report text past this length is truncated before it reaches the model.
-# Gemini 2.5 Flash's context window comfortably fits far more than this, but
+# The model's context window comfortably fits far more than this, but
 # an explicit bound keeps latency/cost predictable; MAX_NER_CHUNKS in
 # tool_registry independently bounds entity extraction. Both truncations are
 # surfaced to the caller rather than happening silently.
@@ -170,26 +149,11 @@ MAX_REPORT_CHARS = 20000
 
 
 async def _send_with_retry(chat, message, max_attempts: int = 3):
-    """
-    Send a message to the Gemini chat session with retry/backoff on rate
-    limits, mirroring the retry logic already used in summarizer.py and
-    verifier.py — previously only those two agents retried; a rate limit hit
-    mid-ReAct-loop here used to bubble up as an unhandled 500.
-    """
-    last_error = None
-    for attempt in range(max_attempts):
-        try:
-            return await asyncio.to_thread(chat.send_message, message)
-        except Exception as e:
-            last_error = e
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 20 * (attempt + 1)
-                print(f"[ORCHESTRATOR] Rate limited, waiting {wait}s "
-                      f"(attempt {attempt + 1}/{max_attempts})...")
-                await asyncio.sleep(wait)
-                continue
-            raise
-    raise last_error
+    """Send one turn on the chat session, backing off on rate limits (shared policy in
+    src/llm.py). The chat keeps the model's full previous turn — including Gemini 3's
+    thought signatures — in its history, which multi-turn tool calling requires."""
+    return await with_retry(lambda: chat.send_message(message),
+                            label="ORCHESTRATOR", attempts=max_attempts, base_wait=20)
 
 
 def _summarize_for_prompt(entities: dict, rule_flags: list, trend_flags: list,
@@ -323,8 +287,19 @@ async def run_orchestrator(
     redaction_map = build_redaction_map(entities, truncated_text)
     delimited_text = wrap_untrusted_document(redact(truncated_text, redaction_map))
 
+    if entities.get("ner_unavailable"):
+        accumulated_data["ingestion_warnings"].append(
+            "The medical NER model could not run, so medications, diagnoses and names were NOT "
+            "extracted — drug-interaction checks did not run and name redaction relies on "
+            "patterns only. Lab values were still read by the structured parser."
+        )
     lab_values = entities.get("lab_values", [])
-    gender = entities.get("patient", {}).get("gender")
+    # Normalise sex and age (NER output, with a regex fallback on the header block) so the
+    # right ICMR range is chosen: "F"/"M" used to fall through to the adult-male range.
+    from src.flagging.demographics import resolve_demographics
+    demo = resolve_demographics(entities.get("patient", {}), truncated_text)
+    entities.setdefault("patient", {}).update({"sex": demo["sex"], "age_years": demo["age_years"]})
+    gender, age_years = demo["sex"], demo["age_years"]
     if not any(l.get("value") is not None for l in lab_values):
         # An empty flag list renders as "all clear". Never let "nothing was read" look
         # like "everything is normal".
@@ -333,9 +308,26 @@ async def run_orchestrator(
             "shown is NOT a statement that results are normal - review the source report."
         )
 
-    icmr_args = {"lab_values": lab_values, "gender": gender}
+    icmr_args = {"lab_values": lab_values, "gender": gender, "age": age_years}
     icmr_result = await _execute_tool("check_icmr_flags", icmr_args)
     accumulated_data["rule_flags"] = icmr_result.get("flags", [])
+    flags_now = accumulated_data["rule_flags"]
+    if gender is None and any("sex not stated" in (f.get("range_basis") or "") for f in flags_now):
+        accumulated_data["ingestion_warnings"].append(
+            "Patient sex was not found in the report, so sex-specific tests were judged against "
+            "the widest adult range. Confirm sex — some values may be abnormal for this patient."
+        )
+    if age_years is None:
+        accumulated_data["ingestion_warnings"].append(
+            "Patient age was not found in the report; adult ranges were assumed. "
+            "Paediatric results need a manual check."
+        )
+    discordant = [f["test"] for f in flags_now if f.get("range_discordant")]
+    if discordant:
+        accumulated_data["ingestion_warnings"].append(
+            "The lab's printed reference range disagrees with ICMR for: "
+            f"{', '.join(discordant)}. Both are shown — check units and the lab's method."
+        )
     _log_step("check_icmr_flags", icmr_args, icmr_result)
 
     # Cross-medication safety (deterministic, offline, no API): drug-drug, drug-lab and
@@ -352,7 +344,9 @@ async def run_orchestrator(
     if isinstance(trends_result, dict):
         accumulated_data["trend_flags"] = trends_result.get("trend_flags", [])
         accumulated_data["baseline_flags"] = trends_result.get("baseline_flags", [])
-        accumulated_data["forecast_flags"] = trends_result.get("forecast_flags", [])
+        from src.features import forecasting_enabled
+        accumulated_data["forecast_flags"] = (
+            trends_result.get("forecast_flags", []) if forecasting_enabled() else [])
     _log_step("detect_trends", trends_args, trends_result)
 
     history_args = {"patient_id": patient_id}
@@ -367,10 +361,15 @@ async def run_orchestrator(
     _log_step("get_patient_history", history_args, {"report_count": prior_visit_count})
 
     # ── Agentic phase — only the 3 genuinely conditional tools ──────────────
-    model = genai.GenerativeModel(
-        model_name=MODEL,
-        system_instruction=ORCHESTRATOR_SYSTEM_PROMPT,
+    from google.genai import types
+    system_prompt = ORCHESTRATOR_SYSTEM_PROMPT
+    if "search_pubmed" not in _enabled_tools():
+        system_prompt = _without_tool_bullet(system_prompt, "search_pubmed")
+    chat_config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
         tools=_build_gemini_tools(),
+        # We run the tools ourselves (concurrently, with caching) — the SDK must not.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     context_summary = _summarize_for_prompt(
@@ -392,111 +391,118 @@ Decide which of your optional tools (if any) apply, and request all applicable o
 this turn.
 """
 
-    chat = model.start_chat()
-    response = await _send_with_retry(chat, initial_message)
-    llm_calls = 1  # counted for the ops dashboard / rate-limit budgeting
-    max_iterations = 4  # safety net only — the agentic phase now needs ~2 turns in practice
+    # The tools below are OPTIONAL enrichment. Everything the clinician relies on (extraction,
+    # ICMR flags, interactions, trends) is already computed above, so a model outage, bad key or
+    # exhausted quota must not throw that away: skip the optional tools, say so, and carry on.
+    llm_calls = 0
     iteration = 0
+    try:
+        chat = get_client().aio.chats.create(model=MODEL, config=chat_config)
+        response = await _send_with_retry(chat, initial_message)
+        llm_calls = 1  # counted for the ops dashboard / rate-limit budgeting
+        max_iterations = 4  # safety net only — the agentic phase now needs ~2 turns in practice
+        iteration = 0
 
-    # Some Gemini responses re-request a function call it already got a
-    # result for in an earlier turn of this same chat (observed in practice:
-    # a report with several medications produced repeated identical
-    # check_drug_safety calls across iterations instead of stopping once all
-    # were checked once). This cache makes a repeat free — same (tool, args)
-    # reuses the earlier result instead of hitting the external API or
-    # ChromaDB again — and stops accumulated_data / tool_calls_log from
-    # gaining duplicate entries for what is really one piece of information.
-    executed_calls_cache: dict[str, dict] = {}
+        # Some Gemini responses re-request a function call it already got a
+        # result for in an earlier turn of this same chat (observed in practice:
+        # a report with several medications produced repeated identical
+        # check_drug_safety calls across iterations instead of stopping once all
+        # were checked once). This cache makes a repeat free — same (tool, args)
+        # reuses the earlier result instead of hitting the external API or
+        # ChromaDB again — and stops accumulated_data / tool_calls_log from
+        # gaining duplicate entries for what is really one piece of information.
+        executed_calls_cache: dict[str, dict] = {}
 
-    def _cache_key(tool_name: str, tool_args: dict) -> str:
-        return f"{tool_name}::{json.dumps(tool_args, sort_keys=True, default=str)}"
+        def _cache_key(tool_name: str, tool_args: dict) -> str:
+            return f"{tool_name}::{json.dumps(tool_args, sort_keys=True, default=str)}"
 
-    while iteration < max_iterations:
-        iteration += 1
+        while iteration < max_iterations:
+            iteration += 1
 
-        tool_calls_in_response = []
-        for candidate in response.candidates:
-            for part in candidate.content.parts:
-                if hasattr(part, "function_call") and part.function_call:
-                    tool_calls_in_response.append(part.function_call)
+            tool_calls_in_response = list(response.function_calls or [])
 
-        if not tool_calls_in_response:
-            break
+            if not tool_calls_in_response:
+                break
 
-        # Independent tools (get_similar_history / search_pubmed /
-        # check_drug_safety never depend on each other's output) — run
-        # concurrently instead of one at a time so the model's decision to
-        # call several in one turn actually saves wall-clock, not just calls.
-        for fc in tool_calls_in_response:
-            if on_step:
-                on_step({"type": "tool_call", "tool": fc.name, "args": _to_plain(fc.args)})
+            # Independent tools (get_similar_history / search_pubmed /
+            # check_drug_safety never depend on each other's output) — run
+            # concurrently instead of one at a time so the model's decision to
+            # call several in one turn actually saves wall-clock, not just calls.
+            for fc in tool_calls_in_response:
+                if on_step:
+                    on_step({"type": "tool_call", "tool": fc.name, "args": _to_plain(fc.args or {})})
 
-        async def _run_tracked(fc):
-            tool_name = fc.name
-            tool_args = _to_plain(fc.args)
-            key = _cache_key(tool_name, tool_args)
-            if key in executed_calls_cache:
-                return tool_name, tool_args, executed_calls_cache[key], True
-            result = await _execute_tool(tool_name, tool_args)
-            executed_calls_cache[key] = result
-            return tool_name, tool_args, result, False
+            async def _run_tracked(fc):
+                tool_name = fc.name
+                tool_args = _to_plain(fc.args or {})
+                key = _cache_key(tool_name, tool_args)
+                if key in executed_calls_cache:
+                    return tool_name, tool_args, executed_calls_cache[key], True
+                result = await _execute_tool(tool_name, tool_args)
+                executed_calls_cache[key] = result
+                return tool_name, tool_args, result, False
 
-        executed = await asyncio.gather(*[_run_tracked(fc) for fc in tool_calls_in_response])
-        any_new_work = any(not was_cached for (_, _, _, was_cached) in executed)
+            executed = await asyncio.gather(*[_run_tracked(fc) for fc in tool_calls_in_response])
+            any_new_work = any(not was_cached for (_, _, _, was_cached) in executed)
 
-        tool_results = []
-        for tool_name, tool_args, result, was_cached in executed:
-            if not was_cached:
-                # Only accumulate/log on the FIRST time a given (tool, args)
-                # pair actually ran — a repeat is the same information, not
-                # a new finding, and counting it again would both inflate
-                # "tools called" and duplicate entries like drug_safety.
-                if tool_name == "get_similar_history":
-                    accumulated_data["similar_history"] = result.get("matches", [])
-                elif tool_name == "search_pubmed":
-                    # search_pubmed returns a plain list, not a dict — _execute_tool
-                    # wraps any non-dict tool return as {"result": [...]}, so `result`
-                    # here is that wrapper, not the list itself. Unwrap it first (this
-                    # was a pre-existing bug: the old `isinstance(result, list)` check
-                    # below it never matched, so PubMed references were being stored
-                    # as a single malformed {"result": [...]} entry instead of the
-                    # actual reference list — silently breaking the "Clinical
-                    # Evidence" panel whenever PubMed actually returned results).
-                    raw = result.get("result", result) if isinstance(result, dict) else result
-                    refs = raw if isinstance(raw, list) else [raw]
-                    accumulated_data["pubmed_references"].extend(refs)
-                elif tool_name == "check_drug_safety":
-                    accumulated_data["drug_safety"].append(result)
+            tool_results = []
+            for tool_name, tool_args, result, was_cached in executed:
+                if not was_cached:
+                    # Only accumulate/log on the FIRST time a given (tool, args)
+                    # pair actually ran — a repeat is the same information, not
+                    # a new finding, and counting it again would both inflate
+                    # "tools called" and duplicate entries like drug_safety.
+                    if tool_name == "get_similar_history":
+                        accumulated_data["similar_history"] = result.get("matches", [])
+                    elif tool_name == "search_pubmed":
+                        # search_pubmed returns a plain list, not a dict — _execute_tool
+                        # wraps any non-dict tool return as {"result": [...]}, so `result`
+                        # here is that wrapper, not the list itself. Unwrap it first (this
+                        # was a pre-existing bug: the old `isinstance(result, list)` check
+                        # below it never matched, so PubMed references were being stored
+                        # as a single malformed {"result": [...]} entry instead of the
+                        # actual reference list — silently breaking the "Clinical
+                        # Evidence" panel whenever PubMed actually returned results).
+                        raw = result.get("result", result) if isinstance(result, dict) else result
+                        refs = raw if isinstance(raw, list) else [raw]
+                        accumulated_data["pubmed_references"].extend(refs)
+                    elif tool_name == "check_drug_safety":
+                        accumulated_data["drug_safety"].append(result)
 
-                tool_calls_log.append({
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result_summary": str(result)[:200],
-                })
+                    tool_calls_log.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result_summary": str(result)[:200],
+                    })
 
-            if on_step:
-                on_step({"type": "tool_result", "tool": tool_name,
-                         "result": str(result)[:200] if not was_cached else "(already checked — reused prior result)"})
+                if on_step:
+                    on_step({"type": "tool_result", "tool": tool_name,
+                             "result": str(result)[:200] if not was_cached else "(already checked — reused prior result)"})
 
-            # Gemini requires a function_response for every function_call in
-            # the turn regardless of whether we actually re-ran it, so the
-            # model sees a consistent conversation either way.
-            tool_results.append({
-                "function_response": {
-                    "name": tool_name,
-                    "response": result,
-                }
-            })
+                # Gemini requires a function_response for every function_call in
+                # the turn regardless of whether we actually re-ran it, so the
+                # model sees a consistent conversation either way.
+                tool_results.append(
+                    types.Part.from_function_response(name=tool_name, response=result)
+                )
 
-        if not any_new_work:
-            # Every call this turn was a repeat of something we already have
-            # — the model isn't converging toward "done", it's looping. Stop
-            # here instead of spending another Gemini round trip sending
-            # back data it already has, which risks the same repeat again.
-            break
+            if not any_new_work:
+                # Every call this turn was a repeat of something we already have
+                # — the model isn't converging toward "done", it's looping. Stop
+                # here instead of spending another Gemini round trip sending
+                # back data it already has, which risks the same repeat again.
+                break
 
-        response = await _send_with_retry(chat, tool_results)
-        llm_calls += 1
+            response = await _send_with_retry(chat, tool_results)
+            llm_calls += 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Orchestrator model step failed (%s); continuing without optional tools",
+                       type(e).__name__)
+        accumulated_data["ingestion_warnings"].append(
+            "The AI step that chooses optional lookups (history recall, drug-safety alerts"
+            f"{', literature' if 'search_pubmed' in _enabled_tools() else ''}) could not run "
+            f"({type(e).__name__}). Lab flags, interactions and trends above are unaffected."
+        )
 
     # Compute the unified risk summary here, in code, from whatever ended up
     # accumulated — rather than inside check_icmr_flags (which runs before

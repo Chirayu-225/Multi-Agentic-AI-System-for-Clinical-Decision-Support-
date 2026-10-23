@@ -12,6 +12,7 @@ import {
   MyReports,
   PendingReviews,
   ReviewResult,
+  ReviewOptions,
   TranslateResult,
   AdminMetrics,
   AuditEvent,
@@ -56,11 +57,15 @@ export class ApiService {
   reviewReport(
     reportId: string,
     decision: 'approve' | 'reject',
-    note: string
+    note: string,
+    opts: ReviewOptions = {}
   ): Observable<ReviewResult> {
     return this.http.post<ReviewResult>(`${this.base}/report/${reportId}/review`, {
       decision,
       note,
+      acknowledge_warnings: !!opts.acknowledgeWarnings,
+      edited_clinical_summary: opts.editedClinicalSummary ?? null,
+      edited_patient_summary: opts.editedPatientSummary ?? null,
     });
   }
 

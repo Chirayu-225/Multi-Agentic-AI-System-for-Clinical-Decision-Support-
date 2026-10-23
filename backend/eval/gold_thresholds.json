@@ -1,0 +1,9 @@
+{
+  "_comment": "Floors for eval/run_gold.py --check on REAL reports. Starting values; raise them as the gold set grows and the parser improves. Not run in CI (the gold set never leaves your machine).",
+  "min": {
+    "extraction.recall": 0.85,
+    "extraction.precision": 0.9,
+    "demographics.sex_accuracy": 0.95,
+    "agreement_with_lab": 0.9
+  }
+}

@@ -23,10 +23,12 @@ Runs at `http://localhost:8000` — Swagger UI at `/docs`, health check at `/hea
 
 ```
 src/
-  agents/       orchestrator (ReAct + tool calling), summarizer, verifier (fail-closed)
-  api/          FastAPI app, routes, auth
+  llm.py        the one Gemini client + pinned model id (google-genai SDK)
+  features.py   optional features, off by default (forecasting, PubMed)
+  agents/       orchestrator (tool calling), summarizer, verifier (fail-closed), translator
+  api/          auth (the FastAPI app itself is backend/main.py)
   db/           SQLAlchemy models + session
-  flagging/     ICMR rule engine + longitudinal intelligence (trend/baseline/forecast)
+  flagging/     ICMR rule engine, age/sex range selection, longitudinal intelligence
   ingestion/    PDF text extraction (digital + OCR), Hindi transliteration
   ner/          GLiNER-based medical entity extraction
   security/     injection detection, de-identification, passwords, hash-chained audit log, rate limiting
@@ -41,9 +43,10 @@ src/
 ```bash
 pip install -r requirements-dev.txt
 python -m py_compile $(find . -name "*.py" -not -path "*/venv/*")
-python -m pytest -q                 # 195 tests; Gemini and the ML libraries are stubbed
+python -m pytest -q                 # Gemini and the heavy ML libraries are stubbed
 python -m eval.run_eval --check     # regenerates ../EVAL_RESULTS.md, fails on regression
 ```
 
 Add `--live` to `run_eval` (with `GEMINI_API_KEY` set) to measure the real Verifier.
+`python -m eval.run_gold` scores real, de-identified reports (see eval/run_gold.py).
 Test accounts used by the suite live in `tests/conftest.py`.

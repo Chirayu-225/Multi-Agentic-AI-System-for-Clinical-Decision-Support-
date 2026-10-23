@@ -156,6 +156,36 @@ interface Bar { x: number; y: number; w: number; h: number; count: number; label
           </div>
         </div>
 
+        <!-- Review quality: is human review real, and are summaries good enough? -->
+        @if (m.review; as rv) {
+          <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">
+              Clinician review ({{ rv.reviewed }} reviewed)
+            </p>
+            <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">Approved without edit</p>
+                <p class="font-mono text-lg text-gray-100">{{ pct(rv.approve_without_edit_rate) }}</p></div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">Edited before approval</p>
+                <p class="font-mono text-lg text-gray-100">{{ pct(rv.edit_rate) }}</p></div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">Rejected</p>
+                <p class="font-mono text-lg text-gray-100">{{ pct(rv.rejection_rate) }}</p></div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">Approved with warnings accepted</p>
+                <p class="font-mono text-lg text-gray-100">{{ rv.approved_with_acknowledged_warnings }}</p></div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">Median time to review</p>
+                <p class="font-mono text-lg text-gray-100">{{ rv.median_minutes_to_review ?? '—' }} min</p></div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-[11px] text-gray-500">90th percentile</p>
+                <p class="font-mono text-lg text-gray-100">{{ rv.p90_minutes_to_review ?? '—' }} min</p></div>
+            </div>
+            <p class="text-xs text-gray-500 mt-3">{{ rv.note }}</p>
+          </div>
+        }
+
         <!-- Security, last 24 h -->
         <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
           <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">Security (last 24h)</p>

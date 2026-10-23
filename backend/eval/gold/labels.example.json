@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to labels.json (git-ignored) and add one entry per de-identified report in this folder. Enter values exactly as printed. layout: digital | photo | scan. sex/age as on the report.",
+  "reports": [
+    {
+      "file": "report_001.pdf",
+      "lab_chain": "chain-a",
+      "layout": "digital",
+      "sex": "F",
+      "age": 34,
+      "labs": [
+        {"test": "Hemoglobin", "value": 12.5, "unit": "g/dL", "ref_low": 12.0, "ref_high": 15.0},
+        {"test": "HbA1c", "value": 6.1, "unit": "%", "ref_high": 5.7},
+        {"test": "TSH", "value": 2.4, "unit": "uIU/mL", "ref_low": 0.4, "ref_high": 4.0}
+      ]
+    }
+  ]
+}

@@ -4,10 +4,10 @@
 fastapi==0.111.0
 uvicorn==0.30.1
 python-multipart==0.0.31
-websockets==12.0
+websockets==15.0.1
 
-# Gemini
-google-generativeai==0.8.3
+# Gemini (current SDK — the legacy google-generativeai drops Gemini 3 thought signatures)
+google-genai==2.33.0
 
 # Database
 sqlalchemy==2.0.30
@@ -34,6 +34,6 @@ PyJWT==2.15.1
 
 # Utilities
 python-dotenv==1.2.2
-pydantic==2.7.4
-httpx==0.27.0
+pydantic==2.12.5
+httpx==0.28.1
 numpy==1.26.4

@@ -59,7 +59,7 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
             </div>
           </div>
           <p class="text-xs text-gray-600 mt-2 leading-tight">
-            Report analysis &amp; risk flagging
+            What changed in your patient's labs, verified
           </p>
         </div>
 
@@ -110,7 +110,7 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
         <div class="p-4 border-t border-gray-800 hidden md:block">
           <div class="bg-gray-800/60 border border-gray-800/80 rounded-lg p-3 text-xs text-gray-500 leading-relaxed">
             <p class="font-semibold text-gray-400 mb-1.5 tracking-wide">Multi-Agent Pipeline</p>
-            <p>Orchestrator + Verification agents running on Gemini 2.5 Flash</p>
+            <p>Orchestrator + Verification agents running on Gemini 3.8 Flash</p>
             <div class="mt-2 flex gap-1">
               <span class="bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded text-xs">PubMed</span>
               <span class="bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded text-xs">OpenFDA</span>
@@ -158,9 +158,13 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
       <div class="p-4 sm:p-6 max-w-2xl">
         <p class="text-xs font-semibold text-blue-400 uppercase tracking-widest mb-1">About</p>
         <h1 class="text-2xl sm:text-3xl font-bold text-white tracking-tight mb-2">Agentic Medical Assistant</h1>
+        <p class="text-gray-300 text-base mb-2">
+          For GPs in Indian clinics: see what changed in a patient's labs since the last visit —
+          checked against the right reference range, verified, and explained in the patient's
+          language — in under a minute.
+        </p>
         <p class="text-gray-500 text-sm mb-8">
-          A multi-agent pipeline for analysing medical reports, with ICMR-grounded risk
-          flagging for Indian healthcare contexts.
+          Nothing reaches the patient until a clinician has reviewed it.
         </p>
 
         <div class="space-y-4">
@@ -250,22 +254,22 @@ export class AppComponent {
     {
       icon: '🇮🇳',
       title: 'ICMR-Grounded Risk Flagging',
-      desc: 'Lab values checked against Indian Council of Medical Research reference ranges, not Western defaults. Gender-specific thresholds included.',
+      desc: 'Lab values checked against Indian Council of Medical Research reference ranges, chosen for the patient\'s age and sex, and shown next to the lab\'s own printed range — with any disagreement between the two called out.',
     },
     {
       icon: '📈',
-      title: 'Four-Tier Longitudinal Intelligence',
-      desc: '1) Trend detection across visits, 2) deviation from this patient\'s own historical baseline (not just the population range), 3) illustrative slope-based threshold projections, 4) semantic recall of similar past episodes from report text — via ChromaDB.',
+      title: 'What Changed Since the Last Visit',
+      desc: 'Trends across visits, drift from this patient\'s own baseline even while still inside the population range, and recall of similar past episodes from earlier report text. Rejected reports are dropped from the history so they never shape a trend.',
     },
     {
-      icon: '📚',
-      title: 'Real Clinical Evidence',
-      desc: 'Agent automatically searches PubMed for relevant clinical guidelines when significant findings are detected. OpenFDA checked for medication safety alerts.',
+      icon: '💊',
+      title: 'Medication Safety',
+      desc: 'A curated drug–drug and drug–lab interaction rule set runs on every report, and OpenFDA is checked for safety alerts on the listed medications.',
     },
     {
       icon: '👩‍⚕️',
       title: 'Clinician Approval Before Release',
-      desc: 'Every analysis starts as "pending review" and stays hidden from the patient until a clinician approves it. Source evidence for each claim, numeric grounding checks, a medication-interaction rule set and FHIR export support that review.',
+      desc: 'Every analysis starts as "pending review" and stays hidden from the patient until a clinician approves it. The clinician can edit either summary first (the AI original is kept), and any warning must be explicitly acknowledged before release.',
     },
     {
       icon: '🛡️',
@@ -277,8 +281,8 @@ export class AppComponent {
   stack = [
     'Angular', 'TypeScript', 'TailwindCSS',
     'FastAPI', 'SQLAlchemy', 'PostgreSQL',
-    'ChromaDB', 'Gemini 2.5 Flash',
+    'ChromaDB', 'Gemini 3.8 Flash',
     'GLiNER', 'EasyOCR', 'PyMuPDF',
-    'PubMed API', 'OpenFDA API', 'Docker',
+    'OpenFDA API', 'Docker',
   ];
 }

@@ -22,6 +22,13 @@ export interface RiskFlag {
   explanation?: string;
   normal_range?: { min: number; max: number; unit: string };
   source?: string;
+  /** Which ICMR range was used, e.g. "adult female range", "paediatric range". */
+  range_basis?: string | null;
+  /** The range printed on the lab's own report, when one was read. */
+  lab_range?: { min: number | null; max: number | null; unit: string } | null;
+  lab_direction?: 'high' | 'low' | 'normal' | null;
+  /** True when the lab's printed range and ICMR disagree about this value. */
+  range_discordant?: boolean;
 }
 
 export interface TrendFlag {
@@ -104,6 +111,8 @@ export interface LLMOutput {
   verification: Verification;
   longitudinal_narrative?: string;
   translation?: Translation | null;
+  /** The model's original text, present only when a clinician edited before approving. */
+  ai_original?: { clinical_summary: string | null; patient_summary: string | null } | null;
 }
 
 export interface PubMedReference {
@@ -180,6 +189,11 @@ export interface ReviewInfo {
   reviewed_by: string | null;
   reviewed_at: string | null;
   note?: string | null;
+  /** True when the clinician changed a summary before approving. */
+  edited?: boolean;
+  warnings_acknowledged?: boolean;
+  /** Warnings that must be explicitly accepted before approval is allowed. */
+  requires_acknowledgement?: string[];
 }
 
 export interface ReviewResult {
@@ -187,6 +201,14 @@ export interface ReviewResult {
   status: ReviewStatus;
   reviewed_by: string | null;
   reviewed_at: string | null;
+  /** Which summaries were replaced by the clinician's text. */
+  edited?: string[];
+}
+
+export interface ReviewOptions {
+  acknowledgeWarnings?: boolean;
+  editedClinicalSummary?: string | null;
+  editedPatientSummary?: string | null;
 }
 
 export interface PendingReviewItem {
@@ -321,6 +343,17 @@ export interface AdminMetrics {
     p95_duration_ms: number | null;
     avg_llm_calls: number | null;
     avg_tool_calls: number | null;
+    models?: Record<string, number>;
+  };
+  review?: {
+    reviewed: number;
+    approve_without_edit_rate: number;
+    edit_rate: number;
+    rejection_rate: number;
+    approved_with_acknowledged_warnings: number;
+    median_minutes_to_review: number | null;
+    p90_minutes_to_review: number | null;
+    note: string;
   };
   safety: {
     verifier_correction_rate: number | null;

@@ -36,24 +36,33 @@ def _get_embedder():
     return _embedder
 
 
+def _collection_name(patient_id: str) -> str:
+    return "patient-" + "".join(c if c.isalnum() else "-" for c in patient_id)
+
+
 def _get_collection(patient_id: str):
     client = _get_client()
-    safe_id = "patient-" + "".join(c if c.isalnum() else "-" for c in patient_id)
-    return client.get_or_create_collection(name=safe_id, metadata={"hnsw:space": "cosine"})
+    return client.get_or_create_collection(name=_collection_name(patient_id),
+                                           metadata={"hnsw:space": "cosine"})
 
 
 def store_report(patient_id: str, report_text: str, lab_values: list,
-                 report_date: str = None, filename: str = "") -> str:
+                 report_date: str = None, filename: str = "", report_id: str | None = None) -> str:
+    """Store one report for longitudinal recall. Callers pass ALREADY-REDACTED text (see
+    main.py). Semantic-recall results from this store are sent to the model as tool
+    results, so nothing identifying may live here — which is also why the uploaded
+    filename (often "Report_<Patient_Name>.pdf") is NOT stored; `filename` is accepted
+    for backward compatibility and ignored. The vector id is the report id, so a single
+    report can be removed later."""
     collection = _get_collection(patient_id)
     embedder = _get_embedder()
-    report_id = str(uuid.uuid4())
+    report_id = report_id or str(uuid.uuid4())
     date_str = report_date or datetime.now().strftime("%Y-%m-%d")
     short_text = " ".join(report_text.split()[:512])
     embedding = embedder.encode(short_text).tolist()
     metadata = {
         "patient_id": patient_id,
         "report_date": date_str,
-        "filename": filename,
         "lab_values_json": json.dumps(lab_values),
     }
     collection.add(ids=[report_id], embeddings=[embedding],
@@ -75,7 +84,7 @@ def get_patient_history(patient_id: str) -> list[dict]:
         reports.append({
             "report_id": report_id,
             "report_date": meta.get("report_date", ""),
-            "filename": meta.get("filename", ""),
+            "filename": "",
             "lab_values": json.loads(meta.get("lab_values_json", "[]")),
         })
     reports.sort(key=lambda r: r["report_date"])
@@ -135,7 +144,7 @@ def semantic_search_history(patient_id: str, query: str, top_k: int = 3) -> list
         matches.append({
             "report_id": ids[i],
             "report_date": metas[i].get("report_date", ""),
-            "filename": metas[i].get("filename", ""),
+            "filename": "",
             "similarity_pct": round(similarity_pct, 1),
             "snippet": snippet,
         })
@@ -150,3 +159,28 @@ def get_historical_report_dates(patient_id: str) -> list[str]:
     """
     history = get_patient_history(patient_id)
     return [r["report_date"] for r in history]
+
+
+# ── Erasure ─────────────────────────────────────────────────────────────────
+# Deleting a patient in SQL alone used to leave their report text and lab values here, and
+# because trend detection reads this store, re-using the patient id brought the old history
+# back. These are called by DELETE /patient/{id} and when a clinician rejects a report.
+
+def delete_patient_history(patient_id: str) -> bool:
+    """Drop the patient's whole collection. Returns True if one existed. Raises on store
+    errors so the caller can refuse to report an erasure that did not happen."""
+    client = _get_client()
+    name = _collection_name(patient_id)
+    try:
+        existing = {getattr(c, "name", c) for c in client.list_collections()}
+    except Exception:
+        existing = {name}  # can't list: attempt the delete and let it raise if it must
+    if name not in existing:
+        return False
+    client.delete_collection(name=name)
+    return True
+
+
+def delete_report_history(patient_id: str, report_id: str) -> None:
+    """Remove one report (e.g. rejected by a clinician) so it stops feeding trends."""
+    _get_collection(patient_id).delete(ids=[report_id])

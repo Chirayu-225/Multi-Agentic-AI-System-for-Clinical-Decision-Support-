@@ -8,6 +8,7 @@ eval/run_eval.py - offline evaluation harness.
 What is measured, and against what:
   extraction     lab-value parser (regex path) recall/precision on synthetic reports in 4 layouts
   flagging       ICMR flagging accuracy given the CORRECT lab values (isolates flag logic + name mapping)
+  range_selection  right range for sex as actually written (F/M/...) and for child/adult/elderly ages
   deidentification  identifiers surviving redaction, with oracle entities vs regex-only
   injection      detection rate on an attack corpus, false-positive rate on benign clinical text
   grounding      does the numeric-grounding check catch corrupted summaries (and which kinds it cannot)
@@ -15,7 +16,8 @@ What is measured, and against what:
 
 What is NOT measured offline: the GLiNER model's NER quality and the Gemini Verifier. Those need the
 model weights / an API key; `--live` covers the Verifier. Numbers here are on SYNTHETIC data, so they
-show the pipeline's logic works and where it breaks - they are not clinical validation.
+show the pipeline's logic works and where it breaks - they are not clinical validation. Real reports
+are measured separately by eval/run_gold.py.
 """
 
 import argparse
@@ -80,6 +82,35 @@ def eval_extraction(cases):
         "by_layout_recall": {k: _pct(v["tp"], v["tp"] + v["fn"]) for k, v in sorted(by_layout.items())},
         "values_total": tp + fn,
     }
+
+
+# ── 1b. Reference-range selection (sex spellings x ages) ─────────────────────
+
+# (test, value, sex as written on real reports, age, expected direction). Covers the bug where
+# "F"/"M" fell through to the adult-male range, and ages that need paediatric/elderly ranges.
+RANGE_CASES = [
+    *[("Hemoglobin", 12.5, sx, 32, "normal") for sx in ("F", "f", "Female", "FEMALE", "32Y/F", "Mrs")],
+    *[("Hemoglobin", 12.5, sx, 54, "low") for sx in ("M", "m", "Male", "54 Years / Male")],
+    ("Hemoglobin", 11.5, "M", 8, "normal"),       # paediatric 11-16
+    ("Hemoglobin", 10.5, "F", 8, "low"),
+    ("Hemoglobin", 12.5, None, 40, "normal"),     # sex unknown -> widest adult 12-17
+    ("Hemoglobin", 11.8, None, 70, "normal"),     # elderly 11.5-16.5
+    ("Creatinine", 1.15, "F", 45, "high"),
+    ("Creatinine", 1.15, "M", 45, "normal"),
+    ("ALT", 40, "F", 30, "high"),
+    ("ALT", 40, "M", 30, "normal"),
+]
+
+
+def eval_range_selection():
+    from src.flagging.risk_flagging import flag_lab_values
+    wrong = []
+    for test, value, sex, age, expected in RANGE_CASES:
+        got = flag_lab_values([{"test": test, "value": value, "unit": ""}], gender=sex, age=age)[0]["direction"]
+        if got != expected:
+            wrong.append(f"{test} {value} sex={sex!r} age={age}: got {got}, expected {expected}")
+    return {"accuracy": _pct(len(RANGE_CASES) - len(wrong), len(RANGE_CASES)),
+            "cases": len(RANGE_CASES), "wrong": wrong}
 
 
 # ── 2. Flagging (oracle lab values) ───────────────────────────────────────────
@@ -297,6 +328,7 @@ def run(live: bool = False) -> dict:
                  "live_verifier": live},
         "extraction": eval_extraction(cases),
         "flagging": eval_flagging(cases),
+        "range_selection": eval_range_selection(),
         "deidentification": eval_deid(cases),
         "injection": eval_injection(cases),
         "grounding": eval_grounding(cases),
@@ -330,6 +362,9 @@ def to_markdown(r: dict) -> str:
           f"| Test name mapped to the right reference range | {pc(f['canonical_mapping_accuracy'])} |",
           f"| Mis-routed names | {'; '.join(f['misrouted_test_names']) or 'none'} |",
           f"| Test names with no reference range | {', '.join(f['unmapped_test_names']) or 'none'} |", "",
+          "## Reference-range selection (sex written as F/M/Female/..., child/adult/elderly)", "",
+          f"{pc(r['range_selection']['accuracy'])} of {r['range_selection']['cases']} cases graded in the right direction. "
+          f"Wrong: {'; '.join(r['range_selection']['wrong']) or 'none'}", "",
           "## De-identification: identifiers surviving redaction", "",
           "| Identifier | With NER entities (oracle) | Regex only (NER missed) |", "|---|---|---|"]
     keys = list(d["oracle_entities"]["leak_rate_by_identifier"])

@@ -81,11 +81,11 @@ def build_bundle(report: dict, *, include_name: bool = False) -> dict:
         return full_url
 
     patient = {"resourceType": "Patient", "identifier": [{"system": "urn:agentic-medical-assistant:patient-id", "value": patient_id}]}
-    gender = (entities.get("patient", {}).get("gender") or "").lower()
-    if gender.startswith("f"):
-        patient["gender"] = "female"
-    elif gender.startswith("m"):
-        patient["gender"] = "male"
+    from src.flagging.demographics import normalize_sex
+    p = entities.get("patient", {}) or {}
+    gender = p.get("sex") or normalize_sex(p.get("gender"))   # "34 Years / F" -> "female"
+    if gender in ("female", "male"):
+        patient["gender"] = gender
     if include_name and entities.get("patient", {}).get("name"):
         patient["name"] = [{"text": entities["patient"]["name"]}]
     patient_ref = add(patient)

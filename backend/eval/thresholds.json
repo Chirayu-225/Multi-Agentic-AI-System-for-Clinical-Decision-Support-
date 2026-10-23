@@ -11,7 +11,8 @@
     "grounding.catch_rate_by_corruption.novel_value": 0.95,
     "grounding.catch_rate_by_corruption.fabricated_lab": 0.99,
     "interactions.brand_resolution_accuracy": 1.0,
-    "interactions.rule_self_consistency": 1.0
+    "interactions.rule_self_consistency": 1.0,
+    "range_selection.accuracy": 1.0
   },
   "max": {
     "flagging.false_alarm_rate_on_normal": 0.01,

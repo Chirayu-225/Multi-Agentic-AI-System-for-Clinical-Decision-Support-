@@ -11,6 +11,10 @@ export function errorMessage(err: unknown, fallback: string): string {
   if (typeof detail === 'string' && detail.trim()) {
     return detail;
   }
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)
+      && typeof (detail as { message?: unknown }).message === 'string') {
+    return (detail as { message: string }).message;
+  }
   if (Array.isArray(detail)) {
     const msgs = detail
       .map((d) => (d && typeof d === 'object' && typeof (d as { msg?: unknown }).msg === 'string'

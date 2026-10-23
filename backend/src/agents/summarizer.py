@@ -1,21 +1,17 @@
 """
 src/agents/summarizer.py
 
-Generates clinical and patient summaries using Gemini 2.5 Flash.
+Generates clinical and patient summaries using the pinned Gemini model (src/llm.py).
 Replaces the local Phi-3 Mini inference from v1.
 Called by the orchestrator after all tool calls are complete.
 """
 
-import os
 import re
-import asyncio
 
-import google.generativeai as genai
+from src.llm import generate_text
 
 from src.security.deidentification import redact
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def _build_context(entities: dict, flags: list, trend_flags: list,
@@ -32,11 +28,19 @@ def _build_context(entities: dict, flags: list, trend_flags: list,
         # context the summary genuinely needs, not identifiers on their own.
         redaction_map = redaction_map or {}
         parts = []
-        for key, value in patient.items():
-            if not value:
-                continue
-            parts.append(redact(value, redaction_map) if key == "name" else value)
-        lines.append(f"Patient: {', '.join(parts)}")
+        if patient.get("name"):
+            parts.append(redact(str(patient["name"]), redaction_map))
+        # Prefer the normalised values (orchestrator: src/flagging/demographics.py).
+        age = patient.get("age_years")
+        if age is not None:
+            parts.append(f"age {age:g}" if age >= 1 else f"age {round(age * 12)} months")
+        elif patient.get("age"):
+            parts.append(f"age {patient['age']}")
+        sex = patient.get("sex") or patient.get("gender")
+        if sex:
+            parts.append(str(sex))
+        if parts:
+            lines.append(f"Patient: {', '.join(parts)}")
 
     diagnoses = entities.get("clinical", {}).get("diagnoses", [])
     if diagnoses:
@@ -109,7 +113,6 @@ async def generate_summaries(
     also run on this same (still-redacted) text. Do NOT rehydrate here.
     """
     baseline_flags = baseline_flags or []
-    model = genai.GenerativeModel(model_name=MODEL)
     context = _build_context(
         entities, flags, trend_flags,
         pubmed_refs or [], drug_safety or [],
@@ -158,35 +161,20 @@ SECTION: LONGITUDINAL_NARRATIVE
  "just the latest value." if has_trends else "Write exactly: N/A"}
 """
 
-    # Retry on rate limit
-    for attempt in range(3):
-        try:
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            break
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 35 * (attempt + 1)
-                print(f"[SUMMARIZER] Rate limited, waiting {wait}s...")
-                await asyncio.sleep(wait)
-            else:
-                print(f"[SUMMARIZER] Error: {e}")
-                return {
-                    "clinical_summary": "Summary unavailable.",
-                    "patient_summary": "Summary unavailable.",
-                    "explained_flags": [{**f, "explanation": ""} for f in abnormal],
-                    "followup_actions": ["Consult a healthcare provider."],
-                    "longitudinal_narrative": "",
-                }
-    else:
-        return {
-            "clinical_summary": "Summary unavailable — quota exceeded.",
-            "patient_summary": "Summary unavailable — quota exceeded.",
-            "explained_flags": [{**f, "explanation": ""} for f in abnormal],
-            "followup_actions": ["Consult a healthcare provider."],
-            "longitudinal_narrative": "",
-        }
-
-    text = response.text.strip()
+    unavailable = lambda why: {  # noqa: E731
+        "clinical_summary": f"Summary unavailable{why}.",
+        "patient_summary": f"Summary unavailable{why}.",
+        "explained_flags": [{**f, "explanation": ""} for f in abnormal],
+        "followup_actions": ["Consult a healthcare provider."],
+        "longitudinal_narrative": "",
+    }
+    try:
+        text = await generate_text(prompt, label="SUMMARIZER")
+    except Exception as e:  # noqa: BLE001
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return unavailable(" — quota exceeded")
+        print(f"[SUMMARIZER] Error: {type(e).__name__}")
+        return unavailable("")
 
     def _extract_section(section_name: str) -> str:
         pattern = rf"SECTION: {section_name}\n(.*?)(?=SECTION:|$)"

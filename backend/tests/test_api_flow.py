@@ -20,6 +20,9 @@ from src.security.deidentification import build_redaction_map
 CLIN = ("dr.rao", "Str0ng-Clinician-Pw!")
 PAT = ("priya", "Str0ng-Patient-Pw!")
 API_KEY = "test-service-key"
+# The fixture summary contains an ungrounded number (8.4), so approval needs an explicit
+# acknowledgement of that warning — see tests/test_review_flow.py for the gate itself.
+APPROVE = {"decision": "approve", "acknowledge_warnings": True}
 
 RAW_TEXT = (
     "Patient Name: Priya Sharma   Phone: 9876543210\n"
@@ -279,7 +282,7 @@ def test_patient_cannot_see_unapproved_report_then_can_after_approval(client):
     assert client.get(f"/report/{rid}", headers=ph).status_code == 404       # pending: invisible
     assert client.get("/patient/P001/history", headers=ph).json()["report_count"] == 0
 
-    assert client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"}).status_code == 200
+    assert client.post(f"/report/{rid}/review", headers=ch, json=APPROVE).status_code == 200
 
     view = client.get(f"/report/{rid}", headers=ph).json()
     assert view["review"]["status"] == "approved"
@@ -291,7 +294,7 @@ def test_patient_cannot_see_unapproved_report_then_can_after_approval(client):
 def test_patient_cannot_access_other_patients(client):
     ch, ph = login(client, CLIN), login(client, PAT)
     rid = upload(client, ch, patient_id="P999").json()["report_id"]
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     assert client.get(f"/report/{rid}", headers=ph).status_code == 404
     assert client.get("/patient/P999/history", headers=ph).status_code == 404
     assert client.get("/patient/P999/trends", headers=ph).status_code == 404
@@ -303,7 +306,7 @@ def test_patient_forbidden_from_staff_actions(client):
     assert client.get("/patients", headers=ph).status_code == 403
     assert client.get("/admin/audit", headers=ph).status_code == 403
     assert client.delete("/patient/P001", headers=ph).status_code == 403
-    assert client.post("/report/x/review", headers=ph, json={"decision": "approve"}).status_code == 403
+    assert client.post("/report/x/review", headers=ph, json=APPROVE).status_code == 403
 
 
 def test_service_key_can_upload_but_never_review_or_read_audit(client):
@@ -311,7 +314,7 @@ def test_service_key_can_upload_but_never_review_or_read_audit(client):
     r = upload(client, sh)
     assert r.status_code == 200
     rid = r.json()["report_id"]
-    assert client.post(f"/report/{rid}/review", headers=sh, json={"decision": "approve"}).status_code == 403
+    assert client.post(f"/report/{rid}/review", headers=sh, json=APPROVE).status_code == 403
     assert client.get("/admin/audit", headers=sh).status_code == 403
     assert client.get("/admin/metrics", headers=sh).status_code == 403
 
@@ -338,7 +341,7 @@ def test_reject_requires_reason_and_hides_from_patient(client):
 def test_revoking_an_approval_hides_it_again(client):
     ch, ph = login(client, CLIN), login(client, PAT)
     rid = upload(client, ch).json()["report_id"]
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     assert client.get(f"/report/{rid}", headers=ph).status_code == 200
     client.post(f"/report/{rid}/review", headers=ch, json={"decision": "reject", "note": "retracted"})
     assert client.get(f"/report/{rid}", headers=ph).status_code == 404
@@ -349,7 +352,7 @@ def test_pending_queue_lists_unreviewed(client):
     rid = upload(client, ch).json()["report_id"]
     q = client.get("/reviews/pending", headers=ch).json()
     assert q["count"] == 1 and q["reports"][0]["report_id"] == rid
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     assert client.get("/reviews/pending", headers=ch).json()["count"] == 0
 
 
@@ -378,7 +381,7 @@ def test_legacy_report_without_status_is_treated_as_pending(client):
 def test_audit_records_key_events_and_chain_verifies(client):
     ch = login(client, CLIN)
     rid = upload(client, ch).json()["report_id"]
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     actions = [e["action"] for e in client.get("/admin/audit?limit=50", headers=ch).json()["events"]]
     for expected in ("auth.login", "report.upload", "report.approve"):
         assert expected in actions
@@ -415,7 +418,7 @@ def test_editing_an_audit_row_breaks_the_chain(client):
 def test_deleting_an_audit_row_breaks_the_chain(client):
     ch = login(client, CLIN)
     rid = upload(client, ch).json()["report_id"]
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})   # an event AFTER the one we delete
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)   # an event AFTER the one we delete
     _tamper(lambda db: db.query(AuditEvent).filter(AuditEvent.action == "report.upload").delete())
     v = client.get("/admin/audit/verify", headers=ch).json()
     assert v["ok"] is False and "deleted" in v["reason"]
@@ -451,7 +454,7 @@ def test_critical_action_fails_closed_when_audit_unwritable(client):
     mp.setattr(audit, "compute_hash", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("audit store down")))
     try:
         quiet = TestClient(main.app, raise_server_exceptions=False)
-        r = quiet.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+        r = quiet.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
         assert r.status_code == 500                 # the approval must NOT silently go through
     finally:
         mp.undo()
@@ -483,7 +486,7 @@ def test_fhir_bundle_is_structurally_valid_and_preliminary_until_approved(client
                                        "display": "Hemoglobin [Mass/volume] in Blood"}
     assert hb["interpretation"][0]["coding"][0]["code"] in ("L", "LL")
     assert "name" not in by_type["Patient"][0]                      # no direct identifier by default
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     b2 = client.get(f"/report/{rid}/fhir", headers=ch).json()
     assert next(e["resource"] for e in b2["entry"] if e["resource"]["resourceType"] == "DiagnosticReport")["status"] == "final"
     named = client.get(f"/report/{rid}/fhir?include_name=true", headers=ch).json()
@@ -494,7 +497,7 @@ def test_on_demand_translation_is_redacted_and_patient_scoped(client):
     ch, ph = login(client, CLIN), login(client, PAT)
     rid = upload(client, ch).json()["report_id"]
     assert client.post(f"/report/{rid}/translate?language=hi", headers=ph).status_code == 404   # not approved yet
-    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve"})
+    client.post(f"/report/{rid}/review", headers=ch, json=APPROVE)
     r = client.post(f"/report/{rid}/translate?language=hi", headers=ph)
     assert r.status_code == 200 and "Priya Sharma" in r.json()["text"]
     assert "Priya" not in CAPTURED["translate_input"] and "[REDACTED_NAME_1]" in CAPTURED["translate_input"]

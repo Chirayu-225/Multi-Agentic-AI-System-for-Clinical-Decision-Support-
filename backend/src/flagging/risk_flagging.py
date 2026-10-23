@@ -153,40 +153,76 @@ def _canonical_name(test_name: str) -> str:
     return key
 
 
-def _get_range(canonical: str, gender: str = None) -> dict | None:
-    """Look up the appropriate ICMR range for a lab test."""
+def _get_range(canonical: str, gender: str = None, age: float | None = None) -> dict | None:
+    """
+    Pick the ICMR range for this patient. Returns the range plus a `basis` label that the UI
+    and summaries show, so a clinician can see WHICH range a value was judged against.
+
+    Order: child (<18) -> sex-specific adult -> elderly (>=65, when no sex-specific range
+    applies) -> the test's single default/normal range. When the test only has
+    sex-specific ranges and sex is unknown, the WIDEST adult range is used and labelled as
+    such — never silently the first (adult-male) entry, which is what the old lookup did.
+    """
+    from src.flagging.demographics import normalize_age, normalize_sex, MALE, FEMALE
+
     if canonical not in REFERENCE_RANGES:
         return None
-    ref    = REFERENCE_RANGES[canonical]
-    ranges = ref["ranges"]
+    ranges = REFERENCE_RANGES[canonical]["ranges"]
+    sex = normalize_sex(gender)
+    age = normalize_age(age)
 
-    # Try gender-specific range first
-    if gender:
-        g = gender.lower().strip()
-        if ("male" in g and "female" not in g) and "adult_male" in ranges:
-            return ranges["adult_male"]
-        if "female" in g and "adult_female" in ranges:
-            return ranges["adult_female"]
+    def _with(key, basis):
+        return {**ranges[key], "basis": basis}
 
-    # For tests with severity-named ranges (glucose), return the normal range
-    if "normal" in ranges:
-        return ranges["normal"]
+    if age is not None and age < 18:
+        if "child" in ranges:
+            return _with("child", "paediatric range")
+        child_note = " (no paediatric range on file — verify)"
+    else:
+        child_note = ""
 
-    # Fall back to default
-    if "default" in ranges:
-        return ranges["default"]
+    sex_key = {MALE: "adult_male", FEMALE: "adult_female"}.get(sex)
+    if sex_key and sex_key in ranges:
+        return _with(sex_key, f"adult {sex} range{child_note}")
 
-    # Return first available range
-    return list(ranges.values())[0]
+    if age is not None and age >= 65 and "elderly" in ranges:
+        return _with("elderly", "elderly range")
+
+    for key in ("normal", "default"):
+        if key in ranges:
+            return _with(key, f"standard range{child_note}")
+
+    adult = [ranges[k] for k in ("adult_male", "adult_female") if k in ranges]
+    if adult:
+        return {
+            "min": min(r["min"] for r in adult),
+            "max": max(r["max"] for r in adult),
+            "basis": "sex not stated — widest adult range used; confirm sex to refine",
+        }
+    key = next(iter(ranges))
+    return _with(key, f"{key.replace('_', ' ')} range (closest available)")
 
 
-def flag_lab_values(lab_values: list[dict], gender: str = None) -> list[dict]:
+def _printed_direction(value: float, lab: dict) -> str | None:
+    """Direction of the value against the range PRINTED on the lab's own report, if any."""
+    lo, hi = lab.get("ref_low"), lab.get("ref_high")
+    if lo is None and hi is None:
+        return None
+    if lo is not None and value < lo:
+        return "low"
+    if hi is not None and value > hi:
+        return "high"
+    return "normal"
+
+
+def flag_lab_values(lab_values: list[dict], gender: str = None, age=None) -> list[dict]:
     """
     Layer 1: Rule-based flagging against ICMR reference ranges.
 
     Args:
         lab_values: list of { test, value, unit }
-        gender: optional patient gender for range selection
+        gender: optional patient sex for range selection ("M", "Female", ...)
+        age: optional age in years (or a raw string like "54 Years") for range selection
 
     Returns:
         list of flags: {
@@ -211,7 +247,10 @@ def flag_lab_values(lab_values: list[dict], gender: str = None) -> list[dict]:
             continue
 
         canonical = _canonical_name(test)
-        ref = _get_range(canonical, gender)
+        ref = _get_range(canonical, gender, age)
+        printed_dir = _printed_direction(numeric_val, lab)
+        lab_range = ({"min": lab.get("ref_low"), "max": lab.get("ref_high"), "unit": unit}
+                     if printed_dir else None)
 
         if ref is None:
             # Unknown test — still report it but as informational
@@ -226,6 +265,9 @@ def flag_lab_values(lab_values: list[dict], gender: str = None) -> list[dict]:
                 "message": f"{test}: {numeric_val} {unit} — no ICMR reference range available",
                 "source": "N/A",
                 "flag_type": "population_range",
+                "lab_range": lab_range,
+                "lab_direction": printed_dir,
+                "range_discordant": False,
             })
             continue
 
@@ -276,12 +318,27 @@ def flag_lab_values(lab_values: list[dict], gender: str = None) -> list[dict]:
                 f"Deviation: {diff_pct:.1f}% above maximum."
             )
 
+        # The lab printed its own range (calibrated to its analyser). If it disagrees with
+        # ICMR about whether this value is abnormal, say so — the clinician is holding that
+        # report, and silently contradicting it is worse than showing both.
+        discordant = printed_dir is not None and printed_dir != direction
+        if discordant:
+            message += (
+                f" NOTE: the lab's own printed range ({lab.get('ref_low', '?')}–"
+                f"{lab.get('ref_high', '?')} {unit}) reads this value as {printed_dir} — "
+                f"ranges disagree; check units and the lab's method."
+            )
+
         flags.append({
             "test": test,
             "value": numeric_val,
             "unit": unit,
             "canonical": canonical,
             "normal_range": {"min": low, "max": high, "unit": unit},
+            "range_basis": ref.get("basis"),
+            "lab_range": lab_range,
+            "lab_direction": printed_dir,
+            "range_discordant": discordant,
             "severity": severity,
             "direction": direction,
             "message": message,

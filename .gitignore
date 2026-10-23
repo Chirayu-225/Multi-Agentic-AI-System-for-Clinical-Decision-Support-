@@ -30,3 +30,11 @@ postgres_data/
 .vscode/
 .idea/
 .DS_Store
+
+# Sample/patient report documents — keep out of version control
+/*.pdf
+
+# Real gold-set reports and labels never leave the machine
+backend/eval/gold/*
+!backend/eval/gold/labels.example.json
+backend/eval/results/gold.json

@@ -242,6 +242,35 @@ _SENTENCE_RE = re.compile(
     rf"(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s+(?:was found to be|was measured at|was|is|of|measured|measures|came to|=)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})", re.I)
 
 
+# The lab's own printed reference range, after the result on the same row (or on the next
+# cell line): "13.0 - 17.0", "150000 – 450000", "4.0 to 5.6", "< 200", "> 60", "Up to 40".
+_RANGE_BOTH = re.compile(rf"(?P<lo>{_NUM})\s*(?:-|–|—|to)\s*(?P<hi>{_NUM})", re.I)
+_RANGE_UPPER = re.compile(rf"(?:<=?|≤|up\s*to|upto|less\s*than)\s*(?P<hi>{_NUM})", re.I)
+_RANGE_LOWER = re.compile(rf"(?:>=?|≥|more\s*than|greater\s*than)\s*(?P<lo>{_NUM})", re.I)
+
+
+def _printed_range(rest: str) -> dict:
+    """Parse the first reference range in `rest` into {'ref_low','ref_high'} (either may be
+    missing). Returns {} when there is none, or when it is not a sane low<high pair."""
+    rest = (rest or "").strip()
+    if not rest:
+        return {}
+    try:
+        m = _RANGE_BOTH.search(rest)
+        if m:
+            lo, hi = _parse_number(m.group("lo")), _parse_number(m.group("hi"))
+            return {"ref_low": lo, "ref_high": hi} if lo < hi else {}
+        m = _RANGE_UPPER.search(rest)
+        if m:
+            return {"ref_high": _parse_number(m.group("hi"))}
+        m = _RANGE_LOWER.search(rest)
+        if m:
+            return {"ref_low": _parse_number(m.group("lo"))}
+    except ValueError:
+        return {}
+    return {}
+
+
 def _extract_lab_values_regex(text: str) -> list[dict]:
     """
     Structured lab value extraction, line by line, trying four real-world layouts in order:
@@ -288,7 +317,11 @@ def _extract_lab_values_regex(text: str) -> list[dict]:
             continue
         if test not in seen:
             seen.add(test)
-            matches.append({"test": test, "value": value, "unit": unit})
+            entry = {"test": test, "value": value, "unit": unit}
+            # The sentence layout has no range column; for the others, read what follows the result.
+            if m.re is not _SENTENCE_RE:
+                entry.update(_printed_range(line[m.end():]))
+            matches.append(entry)
 
     # Layout 5: one cell per line (common when a PDF table is extracted):
     #   Hemoglobin / 10.2 / g/dL / 13.0 - 17.0.   A recognised unit on the line after the
@@ -312,7 +345,12 @@ def _extract_lab_values_regex(text: str) -> list[dict]:
         except ValueError:
             continue
         seen.add(test)
-        matches.append({"test": test, "value": value, "unit": mu.group("unit")})
+        entry = {"test": test, "value": value, "unit": mu.group("unit")}
+        if i + 3 < len(lines) and not unit_only.match(lines[i + 3]):
+            entry.update(_printed_range(lines[i + 3]) if _RANGE_BOTH.fullmatch(lines[i + 3])
+                         or _RANGE_UPPER.fullmatch(lines[i + 3]) or _RANGE_LOWER.fullmatch(lines[i + 3])
+                         else {})
+        matches.append(entry)
     return matches
 
 
