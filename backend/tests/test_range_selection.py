@@ -120,3 +120,16 @@ def test_fhir_gender_from_raw_report_text():
         b = build_bundle({"patient_id": "P1", "report_id": "r", "entities": {"patient": patient}})
         pat = next(e["resource"] for e in b["entry"] if e["resource"]["resourceType"] == "Patient")
         assert pat.get("gender") == expected
+
+
+def test_sentence_layout_is_not_swallowed_by_loose_row_pattern():
+    """Regression: 'Platelet Count was found to be 228520 cells/mcL' came out as test='be'."""
+    from src.ner.medical_ner import _extract_lab_values_regex
+    from src.flagging.risk_flagging import _canonical_name
+    for line, canon, value in (
+        ("Platelet Count was found to be 228520 cells/mcL on this sample.", "platelets", 228520.0),
+        ("Hemoglobin was found to be 9.2 g/dL on this sample.", "hemoglobin", 9.2),
+        ("Hemoglobin 10.2 g/dL 13.0 - 17.0", "hemoglobin", 10.2),     # loose row still works
+    ):
+        (lab,) = _extract_lab_values_regex(line)
+        assert _canonical_name(lab["test"]) == canon and lab["value"] == value

@@ -4,17 +4,17 @@
     "seed": 42,
     "data": "synthetic (seeded), no real patient data",
     "live_verifier": false,
-    "seconds": 0.59
+    "seconds": 0.7
   },
   "extraction": {
-    "recall": 0.9915,
-    "precision": 0.9915,
+    "recall": 1.0,
+    "precision": 1.0,
     "by_layout_recall": {
       "colon": 1.0,
       "dash": 1.0,
       "decimal_comma": 1.0,
       "grouped": 1.0,
-      "sentence": 0.952,
+      "sentence": 1.0,
       "table": 1.0
     },
     "values_total": 1297

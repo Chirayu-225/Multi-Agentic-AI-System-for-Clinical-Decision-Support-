@@ -238,6 +238,10 @@ _DASH_RE = re.compile(
 _LOOSE_RE = re.compile(
     rf"^(?P<test>[A-Za-z][A-Za-z /().%+\-]{{1,40}}?)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})(?:\s|$)", re.I)
 _NUMBER_TOKEN = re.compile(r"(?:^|\s)\d+(?:[.,]\d+)?(?:\s|$)")
+# Words that only appear in prose ("Platelet Count was found to be 228520 cells/mcL"). The loose
+# row pattern would otherwise take "Platelet Count was found to be" as the test name, which
+# cleaned down to "be" and lost every platelet value written as a sentence.
+_SENTENCE_WORDS = re.compile(r"\b(?:was|is|were|are|found|measured|measures|came|to be)\b", re.I)
 _SENTENCE_RE = re.compile(
     rf"(?P<test>[A-Za-z][A-Za-z0-9 /().%+\-]{{1,40}}?)\s+(?:was found to be|was measured at|was|is|of|measured|measures|came to|=)\s+(?P<value>{_NUM})\s*(?P<unit>{_UNIT_ALT})", re.I)
 
@@ -296,6 +300,8 @@ def _extract_lab_values_regex(text: str) -> list[dict]:
             # swallowed its own value ("Hemoglobin 10.2 g/dL 13.0 - 17.0" read by the dash
             # pattern as test="Hemoglobin 10.2 g/dL 13.0", value=17.0). Reject and try the next layout.
             if cand and not _NUMBER_TOKEN.search(cand.group("test")):
+                if rx is _LOOSE_RE and _SENTENCE_WORDS.search(cand.group("test")):
+                    continue  # prose, not a table row: let the sentence pattern take it
                 m = cand
                 break
         if not m:

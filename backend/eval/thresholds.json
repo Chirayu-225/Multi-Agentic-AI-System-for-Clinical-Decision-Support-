@@ -1,8 +1,8 @@
 {
   "_comment": "CI fails if any measured metric regresses past these. Only metrics that currently hold are gated; known-weak ones (deidentification.regex_only, grounding value_swap/wrong_direction, injection evasions) are reported but deliberately not gated.",
   "min": {
-    "extraction.recall": 0.97,
-    "extraction.precision": 0.97,
+    "extraction.recall": 0.995,
+    "extraction.precision": 0.995,
     "flagging.abnormal_recall": 0.98,
     "flagging.critical_recall": 0.99,
     "flagging.direction_accuracy": 0.98,
