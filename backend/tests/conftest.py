@@ -18,6 +18,8 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 # Environment the app requires at startup. Set before any app import.
+# Never read the developer's real backend/.env during tests (see main.py).
+os.environ["MEDSIGHT_SKIP_DOTENV"] = "1"
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("API_KEY", "test-service-key")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-production-0123456789")

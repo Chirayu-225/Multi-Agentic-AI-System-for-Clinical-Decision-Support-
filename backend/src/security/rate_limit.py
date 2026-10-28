@@ -16,6 +16,7 @@ INCR/EXPIRE is the standard pattern) — noted here rather than silently
 left as a scaling trap.
 """
 
+import math
 import time
 from collections import defaultdict, deque
 
@@ -35,7 +36,9 @@ def allow(key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
         window.popleft()
 
     if len(window) >= max_requests:
-        retry_after = int(window_seconds - (now - window[0])) + 1
+        # ceil, not int()+1: on Windows time.monotonic() ticks every ~15 ms, so elapsed can be
+        # exactly 0 and int()+1 returned window_seconds + 1 (61s for a 60s window).
+        retry_after = math.ceil(window_seconds - (now - window[0]))
         return False, max(retry_after, 1)
 
     window.append(now)

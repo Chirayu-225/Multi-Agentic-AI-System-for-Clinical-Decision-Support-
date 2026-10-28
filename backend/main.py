@@ -27,8 +27,12 @@ from typing import Literal
 # Load .env by an explicit path next to this file, before any of the
 # src.* imports below — src/llm.py reads GEMINI_MODEL at import time, so
 # .env must be loaded before those imports run.
+# Tests set MEDSIGHT_SKIP_DOTENV=1 (tests/conftest.py): with override=True, a developer's real
+# backend/.env would otherwise replace the test values (API_KEY, JWT_SECRET...) and fail the
+# auth tests on any machine that has one.
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+if os.getenv("MEDSIGHT_SKIP_DOTENV") != "1":
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Query, Request,
                      UploadFile, WebSocket, WebSocketDisconnect)

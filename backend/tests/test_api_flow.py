@@ -553,3 +553,10 @@ def test_delete_patient_is_clinician_only_and_audited(client):
     assert client.delete("/patient/P001", headers={"X-API-Key": API_KEY}).status_code == 403
     assert client.delete("/patient/P001", headers=ch).status_code == 200
     assert any(e["action"] == "patient.delete" for e in client.get("/admin/audit", headers=ch).json()["events"])
+
+
+def test_suite_ignores_developer_dotenv():
+    """A real backend/.env must never leak into the test run (it broke 3 auth tests on Windows)."""
+    import os
+    assert os.environ["MEDSIGHT_SKIP_DOTENV"] == "1"
+    assert os.environ["API_KEY"] == API_KEY
