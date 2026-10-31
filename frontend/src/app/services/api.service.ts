@@ -85,6 +85,14 @@ export class ApiService {
     return this.http.get<PendingReviews>(`${this.base}/reviews/pending`);
   }
 
+  /** The review queue as a PDF. De-identified unless includeNames is true (audited either way). */
+  getReviewQueuePdf(includeNames = false): Observable<Blob> {
+    return this.http.get(`${this.base}/reviews/pending/export.pdf`, {
+      params: { include_names: includeNames ? 'true' : 'false' },
+      responseType: 'blob',
+    });
+  }
+
   getMyReports(): Observable<MyReports> {
     return this.http.get<MyReports>(`${this.base}/me/reports`);
   }

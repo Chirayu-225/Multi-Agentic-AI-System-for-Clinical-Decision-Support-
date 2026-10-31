@@ -23,7 +23,9 @@ os.environ["MEDSIGHT_SKIP_DOTENV"] = "1"
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("API_KEY", "test-service-key")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-production-0123456789")
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Hard-set, never setdefault: the API tests DROP ALL TABLES between tests. A DATABASE_URL
+# inherited from the shell or .env once pointed them at the real medsight.db and wiped it.
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ.setdefault("AUDIT_ENABLED", "true")
 os.environ.setdefault("UPLOAD_RATE_LIMIT_MAX", "1000")
 os.environ.setdefault("BOOTSTRAP_CLINICIAN_USERNAME", "dr.rao")
@@ -36,3 +38,11 @@ os.environ.setdefault("BOOTSTRAP_PATIENT_PATIENT_ID", "P001")
 from tests.stubs import install_stubs  # noqa: E402
 
 install_stubs()
+
+
+def pytest_sessionstart(session):
+    """Refuse to run if the app's engine is not the in-memory test database."""
+    from src.db.session import engine
+    if str(engine.url) not in ("sqlite://", "sqlite:///:memory:"):
+        raise RuntimeError(f"Tests must use an in-memory database, got {engine.url!s} — aborting "
+                           "before any table is dropped.")

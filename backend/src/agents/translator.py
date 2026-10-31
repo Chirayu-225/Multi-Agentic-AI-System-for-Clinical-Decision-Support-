@@ -18,6 +18,7 @@ The numeric check compares the multiset of numbers in source and translation, so
 that "helpfully" rounds 9.2 to 9, drops a value, or writes it in Devanagari digits is caught.
 """
 
+import logging
 import re
 from typing import Awaitable, Callable
 
@@ -117,8 +118,11 @@ async def translate_patient_summary(
     try:
         out = await generate(_build_prompt(redacted_summary, language))
     except Exception as e:
+        # The UI only shows the error type; the full traceback goes to the server log
+        # (an AttributeError with no detail was undiagnosable).
+        logging.getLogger("medsight").exception("Translation call failed (%s)", language)
         return {"language": language, "text": None, "ok": False, "attempted": True,
-                "issues": [f"translation call failed: {type(e).__name__}"]}
+                "issues": [f"translation call failed: {type(e).__name__} (details in the server log)"]}
     check = validate_translation(redacted_summary, out, language)
     return {"language": language, "text": out if check["ok"] else None, "ok": check["ok"],
             "attempted": True, "issues": check["issues"]}

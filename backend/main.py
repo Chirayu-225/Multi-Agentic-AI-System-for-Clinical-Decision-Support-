@@ -850,6 +850,53 @@ def pending_reviews(db: Session = Depends(get_db),
     } for r in rows]}
 
 
+@app.get("/reviews/pending/export.pdf")
+def export_pending_reviews_pdf(request: Request, include_names: bool = False,
+                               db: Session = Depends(get_db),
+                               principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """The review queue as a PDF. De-identified unless include_names=true; every export is
+    audited, because a downloaded file leaves the system's access control behind."""
+    from fastapi.responses import Response
+    from src.export.queue_pdf import build_queue_pdf
+
+    rows = (db.query(Report)
+            .filter((Report.review_status == "pending_review") | (Report.review_status.is_(None)))
+            .order_by(Report.created_at.desc()).limit(200).all())
+    items = []
+    for r in rows:
+        rmap = {} if include_names else build_redaction_map(r.entities or {}, "")
+        if include_names:
+            clean = lambda t: t or ""  # noqa: E731
+        else:
+            # Placeholders like "[REDACTED_NAME_1]" are for the model; a reader gets plain words.
+            clean = lambda t: re.sub(r"\[REDACTED_([A-Z]+)_\d+\]",  # noqa: E731
+                                     lambda m: f"[{m.group(1).lower()} removed]", redact(t or "", rmap))
+        # Abnormal by ICMR, or abnormal by the lab's own printed range: both need a look.
+        flags = [f for f in (r.rule_flags or [])
+                 if str(f.get("severity", "")).replace("Severity.", "") != "NORMAL"
+                 or f.get("range_discordant")]
+        items.append({
+            "patient_id": r.patient_id, "report_date": r.report_date,
+            "created_at": r.created_at.strftime("%d %b %Y %H:%M") if r.created_at else None,
+            "filename": r.filename if include_names else None,
+            "overall_severity": (r.risk_summary or {}).get("overall_severity"),
+            "flags": flags,
+            "interactions": (r.drug_interactions or {}).get("interactions", []),
+            "warnings": [clean(w) for w in _review_warnings(r)],
+            "clinical_summary": clean(r.clinical_summary),
+            "patient_summary": clean(r.patient_summary),
+        })
+    pdf = build_queue_pdf(items, generated_by=principal.subject, include_names=include_names)
+    audit.record(actor=principal.subject, role=principal.role, action="reviews.export_pdf",
+                 resource="reviews:pending", ip=_ip(request), critical=True,
+                 detail={"reports": len(items), "include_names": include_names})
+    stamp = datetime.utcnow().strftime("%Y-%m-%d")
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="review-queue-{stamp}.pdf"',
+        "Cache-Control": "no-store",
+    })
+
+
 # ── Report access ──────────────────────────────────────────────────────────────
 
 @app.get("/report/{report_id}")

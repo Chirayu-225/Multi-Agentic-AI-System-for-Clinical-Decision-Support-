@@ -1,18 +1,20 @@
 // src/app/components/review/review-queue.component.ts  (clinician only)
 import { Component, OnDestroy, OnInit, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../services/api.service';
 import { SeverityService } from '../../services/severity.service';
 import { errorMessage } from '../../services/error-message';
+import { downloadBlob } from '../../services/download';
 import { PendingReviewItem, ReportAnalysis, ReviewStatus } from '../../models/report.model';
 import { ReportResultComponent } from '../report/report-result.component';
 
 @Component({
   selector: 'app-review-queue',
   standalone: true,
-  imports: [DatePipe, ReportResultComponent],
+  imports: [DatePipe, FormsModule, ReportResultComponent],
   template: `
     <div class="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6">
 
@@ -25,13 +27,29 @@ import { ReportResultComponent } from '../report/report-result.component';
           </p>
         </div>
         @if (!selected()) {
-          <button type="button" (click)="load()" [disabled]="loading()"
-                  class="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-700 text-gray-300
-                         hover:border-blue-600 hover:text-white transition-colors disabled:opacity-40">
-            {{ loading() ? 'Refreshing...' : 'Refresh' }}
-          </button>
+          <div class="flex flex-wrap items-center gap-3">
+            <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"
+                   title="Off: names and file names are removed from the PDF. Either way the download is audited.">
+              <input type="checkbox" [(ngModel)]="includeNames" class="accent-blue-500" />
+              Include patient names
+            </label>
+            <button type="button" (click)="downloadPdf()" [disabled]="pdfBusy() || loading()"
+                    class="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-700 text-gray-300
+                           hover:border-blue-600 hover:text-white transition-colors disabled:opacity-40">
+              {{ pdfBusy() ? 'Preparing PDF...' : 'Download PDF' }}
+            </button>
+            <button type="button" (click)="load()" [disabled]="loading()"
+                    class="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-700 text-gray-300
+                           hover:border-blue-600 hover:text-white transition-colors disabled:opacity-40">
+              {{ loading() ? 'Refreshing...' : 'Refresh' }}
+            </button>
+          </div>
         }
       </div>
+
+      @if (pdfError()) {
+        <p role="alert" class="mb-4 text-sm text-red-300">{{ pdfError() }}</p>
+      }
 
       @if (notice()) {
         <div role="status" class="mb-4 rounded-xl p-3 border border-emerald-500/30 bg-emerald-500/10 text-sm text-emerald-300">
@@ -146,6 +164,9 @@ export class ReviewQueueComponent implements OnInit, OnDestroy {
   loading = signal(false);
   error = signal<string | null>(null);
   notice = signal<string | null>(null);
+  includeNames = false;
+  pdfBusy = signal(false);
+  pdfError = signal<string | null>(null);
 
   selectedId = signal<string | null>(null);
   selected = signal<ReportAnalysis | null>(null);
@@ -173,6 +194,24 @@ export class ReviewQueueComponent implements OnInit, OnDestroy {
       error: (err) => {
         this.loading.set(false);
         this.error.set(errorMessage(err, 'Could not load the review queue.'));
+      },
+    });
+  }
+
+  downloadPdf(): void {
+    if (this.pdfBusy()) return;
+    this.pdfBusy.set(true);
+    this.pdfError.set(null);
+    const named = this.includeNames;
+    this.api.getReviewQueuePdf(named).subscribe({
+      next: (blob) => {
+        this.pdfBusy.set(false);
+        const day = new Date().toISOString().slice(0, 10);
+        downloadBlob(`review-queue-${day}${named ? '-named' : ''}.pdf`, blob);
+      },
+      error: (err) => {
+        this.pdfBusy.set(false);
+        this.pdfError.set(errorMessage(err, 'Could not create the PDF. Please try again.'));
       },
     });
   }

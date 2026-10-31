@@ -32,6 +32,9 @@ torch==2.3.0
 # Auth
 PyJWT==2.15.1
 
+# PDF export (review queue)
+reportlab==4.4.2
+
 # Utilities
 python-dotenv==1.2.2
 pydantic==2.12.5

@@ -15,3 +15,18 @@ export function downloadJson(filename: string, data: unknown): void {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+
+// Saves a binary Blob (e.g. a PDF from the API) the same way.
+export function downloadBlob(filename: string, blob: Blob): void {
+  const safeName = filename.replace(/[^A-Za-z0-9._-]/g, '_');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safeName;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
