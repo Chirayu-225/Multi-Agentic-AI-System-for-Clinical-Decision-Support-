@@ -30,7 +30,7 @@ import asyncio
 import logging
 from typing import Callable
 
-from src.llm import MODEL, get_client, with_retry
+from src.llm import MODEL, get_client, with_fallback, with_retry
 
 logger = logging.getLogger("medsight")
 from src.tools.tool_registry import TOOL_FUNCTIONS, TOOL_DEFINITIONS
@@ -397,8 +397,15 @@ this turn.
     llm_calls = 0
     iteration = 0
     try:
-        chat = get_client().aio.chats.create(model=MODEL, config=chat_config)
-        response = await _send_with_retry(chat, initial_message)
+        # Open the chat on the pinned model, or on GEMINI_FALLBACK_MODEL if it is overloaded.
+        # Later turns stay on whichever model answered the first (a chat can't switch models).
+        async def _open(model):
+            c = get_client().aio.chats.create(model=model, config=chat_config)
+            return c, await c.send_message(initial_message)
+
+        (chat, response), model_used = await with_fallback(_open, label="ORCHESTRATOR",
+                                                           attempts=3, base_wait=20)
+        accumulated_data["model_used"] = model_used
         llm_calls = 1  # counted for the ops dashboard / rate-limit budgeting
         max_iterations = 4  # safety net only — the agentic phase now needs ~2 turns in practice
         iteration = 0
@@ -520,7 +527,7 @@ this turn.
     accumulated_data["tool_calls_log"] = tool_calls_log
     accumulated_data["llm_calls"] = llm_calls
     accumulated_data["token_usage"] = {
-        "model": MODEL,
+        "model": accumulated_data.pop("model_used", None) or MODEL,
         "iterations": iteration,
     }
 

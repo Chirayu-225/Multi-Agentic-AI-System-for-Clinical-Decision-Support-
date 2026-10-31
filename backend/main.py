@@ -46,6 +46,7 @@ from src.ingestion.document_loader import (
     load_document, ALLOWED_EXTS, PDF_EXTS, sniff_file_type, extension_matches_content,
 )
 from src.agents.orchestrator import run_orchestrator
+from src.llm import begin_model_tracking
 from src.agents.summarizer import generate_summaries
 from src.agents.verifier import verify_and_correct
 from src.agents.translator import (LANGUAGES, is_supported, translate_patient_summary)
@@ -431,6 +432,7 @@ async def upload_report(
     principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_SERVICE)),
 ):
     started = time.monotonic()
+    models_used = begin_model_tracking()   # every model that answers during this upload
     ip = _ip(request)
     caller_fp = fingerprint(principal.subject)
     ok, retry_after = rate_limit_allow(
@@ -695,7 +697,8 @@ async def upload_report(
             was_corrected=str(verified["clinical_corrected"] or verified["patient_corrected"]),
             caller_fingerprint=caller_fp,
             duration_ms=int((time.monotonic() - started) * 1000), llm_calls=llm_calls,
-            model=(agent_data.get("token_usage") or {}).get("model"),
+            # e.g. "gemini-3.8-flash" or, if the fallback answered any call, both models
+            model=",".join(sorted(models_used)) or (agent_data.get("token_usage") or {}).get("model"),
         ))
         db.commit()
 

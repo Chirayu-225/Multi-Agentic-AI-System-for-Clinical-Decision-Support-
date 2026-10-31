@@ -33,7 +33,7 @@ def _ver(pkg: str) -> str:
 
 async def _plain():
     from src.llm import generate_text
-    out = await generate_text("Reply with exactly the word: OK", label="CHECK", attempts=1)
+    out = await generate_text("Reply with exactly the word: OK", label="CHECK", attempts=2)
     return out[:80]
 
 
@@ -45,7 +45,7 @@ async def _translate():
 
 async def _tool_call():
     from google.genai import types
-    from src.llm import MODEL, get_client
+    from src.llm import get_client
 
     tool = types.Tool(function_declarations=[types.FunctionDeclaration(
         name="get_reference_range", description="Look up the normal range for a lab test.",
@@ -53,8 +53,12 @@ async def _tool_call():
                                 "required": ["test"]})])
     cfg = types.GenerateContentConfig(
         tools=[tool], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
-    chat = get_client().aio.chats.create(model=MODEL, config=cfg)
-    r1 = await chat.send_message("Use the tool to look up the normal range for hemoglobin, then answer.")
+    from src.llm import with_fallback
+
+    async def _open(model):
+        c = get_client().aio.chats.create(model=model, config=cfg)
+        return c, await c.send_message("Use the tool to look up the normal range for hemoglobin, then answer.")
+    (chat, r1), _ = await with_fallback(_open, label="CHECK", attempts=2)
     calls = list(r1.function_calls or [])
     if not calls:
         return "model answered without calling the tool (allowed, but the multi-turn path was not exercised)"
@@ -64,18 +68,23 @@ async def _tool_call():
 
 
 async def main() -> int:
-    from src.llm import MODEL
+    from src.llm import FALLBACK_MODEL, MODEL, TIMEOUT_SECONDS, begin_model_tracking
     print(f"python          {sys.version.split()[0]}")
     print(f"google-genai    {_ver('google-genai')}")
     print(f"legacy SDK      google-generativeai {_ver('google-generativeai')} (unused; safe to uninstall)")
     print(f"model           {MODEL}")
+    print(f"fallback model  {FALLBACK_MODEL or 'none (set GEMINI_FALLBACK_MODEL to enable)'}")
+    print(f"timeout         {TIMEOUT_SECONDS:g}s per request; 503/429/timeouts retried up to 3 times")
     print(f"api key set     {'yes' if os.getenv('GEMINI_API_KEY') else 'NO - set GEMINI_API_KEY in backend/.env'}")
     print()
     failed = 0
     for name, fn in (("1. plain generation", _plain), ("2. translation", _translate),
                      ("3. two-turn tool call", _tool_call)):
+        used = begin_model_tracking()
         try:
-            print(f"{name:<24} OK   {await fn()}")
+            out = await fn()
+            via = f" [answered by {', '.join(sorted(used))}]" if used else ""
+            print(f"{name:<24} OK   {out}{via}")
         except Exception:  # noqa: BLE001
             failed += 1
             print(f"{name:<24} FAILED")
