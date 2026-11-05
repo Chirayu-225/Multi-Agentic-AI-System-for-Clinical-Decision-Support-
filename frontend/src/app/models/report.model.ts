@@ -396,13 +396,15 @@ export interface AuditVerification {
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 
-export type Role = 'clinician' | 'patient' | 'service';
+export type Role = 'clinician' | 'patient';
 
 export interface AuthUser {
   username: string;
   role: Role;
   displayName: string;
   patientId: string | null;
+  /** Temporary password: the only thing this session may do is change it. */
+  mustChangePassword: boolean;
 }
 
 export interface LoginResponse {
@@ -413,6 +415,22 @@ export interface LoginResponse {
   username: string;
   display_name: string;
   patient_id: string | null;
+  must_change_password: boolean;
+}
+
+export interface PatientAccount {
+  username: string;
+  display_name: string;
+  patient_id: string;
+  is_active: boolean;
+  must_change_password: boolean;
+  last_login_at: string | null;
+}
+
+/** Returned once by create / reset: the temporary password is never retrievable again. */
+export interface PatientAccountWithSecret extends PatientAccount {
+  temporary_password: string;
+  note: string;
 }
 
 export interface AgentStep {

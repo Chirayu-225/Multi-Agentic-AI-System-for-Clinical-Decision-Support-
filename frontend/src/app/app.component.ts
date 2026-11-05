@@ -7,11 +7,12 @@ import { ReviewQueueComponent } from './components/review/review-queue.component
 import { DashboardComponent } from './components/dashboard/dashboard.component';
 import { PatientPortalComponent } from './components/portal/patient-portal.component';
 import { LoginComponent } from './components/auth/login.component';
+import { AccountsComponent } from './components/accounts/accounts.component';
 import { AuthService } from './services/auth.service';
 import { ReviewStateService } from './services/review-state.service';
 import { Role } from './models/report.model';
 
-type Page = 'analyse' | 'review' | 'history' | 'dashboard' | 'portal' | 'about';
+type Page = 'analyse' | 'review' | 'history' | 'dashboard' | 'accounts' | 'portal' | 'about';
 
 interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
 
@@ -20,10 +21,10 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
   standalone: true,
   imports: [
     NgTemplateOutlet, ReportUploadComponent, PatientHistoryComponent, ReviewQueueComponent,
-    DashboardComponent, PatientPortalComponent, LoginComponent,
+    DashboardComponent, PatientPortalComponent, LoginComponent, AccountsComponent,
   ],
   template: `
-    @if (!auth.isAuthenticated()) {
+    @if (!auth.isAuthenticated() || auth.mustChangePassword()) {
       <app-login />
     } @else {
     <div class="flex flex-col md:flex-row h-dvh bg-gray-950 overflow-hidden">
@@ -127,6 +128,7 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
             @case ('review')    { <app-review-queue /> }
             @case ('history')   { <app-patient-history /> }
             @case ('dashboard') { <app-dashboard /> }
+            @case ('accounts')  { <app-accounts /> }
             @case ('portal')    { <app-patient-portal /> }
             @case ('about')     { <ng-container *ngTemplateOutlet="aboutTpl" /> }
           }
@@ -199,12 +201,13 @@ export class AppComponent {
   menuOpen = signal(false);
 
   private allNav: NavItem[] = [
-    { id: 'analyse',   label: 'Analyse',      icon: '🩺', roles: ['clinician', 'service'] },
+    { id: 'analyse',   label: 'Analyse',      icon: '🩺', roles: ['clinician'] },
     { id: 'review',    label: 'Review queue', icon: '✅', roles: ['clinician'] },
-    { id: 'history',   label: 'Patients',     icon: '📈', roles: ['clinician', 'service'] },
+    { id: 'history',   label: 'Patients',     icon: '📈', roles: ['clinician'] },
     { id: 'dashboard', label: 'Dashboard',    icon: '📊', roles: ['clinician'] },
+    { id: 'accounts',  label: 'Accounts',     icon: '👤', roles: ['clinician'] },
     { id: 'portal',    label: 'My reports',   icon: '📄', roles: ['patient'] },
-    { id: 'about',     label: 'About',        icon: 'ℹ️', roles: ['clinician', 'service', 'patient'] },
+    { id: 'about',     label: 'About',        icon: 'ℹ️', roles: ['clinician', 'patient'] },
   ];
 
   navItems = computed(() => {

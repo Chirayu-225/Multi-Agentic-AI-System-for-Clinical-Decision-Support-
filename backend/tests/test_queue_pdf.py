@@ -3,7 +3,7 @@ import fitz  # PyMuPDF
 
 from src.db.models import Report
 from src.db.session import SessionLocal
-from tests.test_api_flow import (API_KEY, APPROVE, CLIN, PAT, client, fresh_state,  # noqa: F401
+from tests.test_api_flow import (APPROVE, CLIN, PAT, client, fresh_state,  # noqa: F401
                                  login, upload)
 
 URL = "/reviews/pending/export.pdf"
@@ -15,7 +15,6 @@ def _text(pdf: bytes) -> str:
 
 
 def test_export_is_clinician_only(client):
-    assert client.get(URL, headers={"X-API-Key": API_KEY}).status_code == 403
     assert client.get(URL, headers=login(client, PAT)).status_code == 403
     assert client.get(URL).status_code == 401
 

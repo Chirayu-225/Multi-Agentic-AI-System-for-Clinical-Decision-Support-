@@ -115,6 +115,9 @@ class User(Base):
     role          = Column(String, nullable=False)          # clinician | patient
     patient_id    = Column(String)                          # required when role == patient
     is_active     = Column(Boolean, default=True)
+    # True after a clinician creates or resets the account: the password is temporary and the
+    # only thing the token allows is changing it. NULL (older rows) means False.
+    must_change_password = Column(Boolean, default=False)
     failed_logins = Column(Integer, default=0)
     locked_until  = Column(DateTime)
     created_at    = Column(DateTime, default=datetime.utcnow)

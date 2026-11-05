@@ -33,7 +33,7 @@ from src.security.llm_guardrails import sanitize_tool_arg, UnsafeToolArgument
 MAX_NER_CHUNKS = 20
 
 
-async def extract_entities(text: str) -> dict:
+def _extract_entities_sync(text: str) -> dict:
     """
     Extract medical entities from report text using GLiNER NER
     and a custom line-by-line lab value parser.
@@ -122,7 +122,7 @@ async def check_icmr_flags(lab_values: list[dict], gender: str = None, age=None)
     }
 
 
-async def detect_trends(patient_id: str, current_labs: list[dict]) -> dict:
+def _detect_trends_sync(patient_id: str, current_labs: list[dict]) -> dict:
     """
     Compare current lab values against patient's stored history to detect:
       - consistently worsening trends across visits (Layer 2),
@@ -147,7 +147,7 @@ async def detect_trends(patient_id: str, current_labs: list[dict]) -> dict:
     }
 
 
-async def get_patient_history(patient_id: str) -> list[dict]:
+def _get_patient_history_sync(patient_id: str) -> list[dict]:
     """
     Retrieve all stored reports for a patient from ChromaDB,
     sorted oldest-first for longitudinal context.
@@ -156,7 +156,7 @@ async def get_patient_history(patient_id: str) -> list[dict]:
     return _get(patient_id)
 
 
-async def get_similar_history(patient_id: str, query: str, top_k: int = 3) -> dict:
+def _get_similar_history_sync(patient_id: str, query: str, top_k: int = 3) -> dict:
     """
     Semantically search this patient's past report TEXT for episodes similar
     in meaning to `query` — e.g. recurring symptoms or findings phrased
@@ -402,6 +402,29 @@ TOOL_DEFINITIONS = [
 ]
 
 # Map tool names to their async functions
+# ── Async entry points for the blocking tools ────────────────────────────────
+# extract_entities (GLiNER inference), detect_trends / get_patient_history /
+# get_similar_history (ChromaDB + sentence-transformer embeddings) are CPU- or disk-bound
+# synchronous code. Called directly from an `async def` they run ON the event loop, so one
+# upload froze every other request (including /health and the WebSocket stream) for as long
+# as the model ran. asyncio.to_thread moves each onto a worker thread instead.
+
+async def extract_entities(text: str) -> dict:
+    return await asyncio.to_thread(_extract_entities_sync, text)
+
+
+async def detect_trends(patient_id: str, current_labs: list[dict]) -> dict:
+    return await asyncio.to_thread(_detect_trends_sync, patient_id, current_labs)
+
+
+async def get_patient_history(patient_id: str) -> list[dict]:
+    return await asyncio.to_thread(_get_patient_history_sync, patient_id)
+
+
+async def get_similar_history(patient_id: str, query: str, top_k: int = 3) -> dict:
+    return await asyncio.to_thread(_get_similar_history_sync, patient_id, query, top_k)
+
+
 TOOL_FUNCTIONS: dict[str, Any] = {
     "extract_entities":   extract_entities,
     "check_icmr_flags":   check_icmr_flags,

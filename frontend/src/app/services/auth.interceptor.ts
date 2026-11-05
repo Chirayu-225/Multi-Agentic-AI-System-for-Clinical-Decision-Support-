@@ -1,10 +1,9 @@
 // src/app/services/auth.interceptor.ts
-// Attaches credentials to API requests only:
-//   * Authorization: Bearer <jwt>  when a session token exists
-//   * X-API-Key                    otherwise, when the build has a service key
-// Credentials are never sent to a URL outside the API origin. A 401 from any
-// call other than /auth/login ends the session (expired / revoked token); the
-// error is re-thrown so callers still see it.
+// Attaches the session's Bearer token to API requests only. Credentials are never sent to a
+// URL outside the API origin. A 401 from any call other than /auth/login ends the session
+// (expired / revoked token); the error is re-thrown so callers still see it.
+// (The change-password endpoint answers a wrong current password with 400, not 401, so a typo
+// there does not sign the user out.)
 import { HttpErrorResponse, HttpInterceptorFn } from '@angular/common/http';
 import { inject } from '@angular/core';
 import { catchError, throwError } from 'rxjs';
@@ -23,12 +22,9 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
   }
 
   const token = auth.token();
-  let outgoing = req;
-  if (token) {
-    outgoing = req.clone({ setHeaders: { Authorization: `Bearer ${token}` } });
-  } else if (environment.apiKey) {
-    outgoing = req.clone({ setHeaders: { 'X-API-Key': environment.apiKey } });
-  }
+  const outgoing = token
+    ? req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })
+    : req;
 
   const isLogin = /\/auth\/login(\?|$)/.test(req.url);
   return next(outgoing).pipe(

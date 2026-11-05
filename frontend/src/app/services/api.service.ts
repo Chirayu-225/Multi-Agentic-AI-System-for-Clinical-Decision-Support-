@@ -18,6 +18,8 @@ import {
   AuditEvent,
   AuditVerification,
   AgentStep,
+  PatientAccount,
+  PatientAccountWithSecret,
 } from '../models/report.model';
 
 @Injectable({ providedIn: 'root' })
@@ -137,6 +139,31 @@ export class ApiService {
     );
   }
 
+  // ── Patient accounts (clinician only) ─────────────────────────────────────
+
+  listAccounts(): Observable<{ users: PatientAccount[] }> {
+    return this.http.get<{ users: PatientAccount[] }>(`${this.base}/admin/users`);
+  }
+
+  createAccount(
+    username: string,
+    patientId: string,
+    displayName: string
+  ): Observable<PatientAccountWithSecret> {
+    return this.http.post<PatientAccountWithSecret>(`${this.base}/admin/users`, {
+      username,
+      patient_id: patientId,
+      display_name: displayName || null,
+    });
+  }
+
+  resetAccountPassword(username: string): Observable<PatientAccountWithSecret> {
+    return this.http.post<PatientAccountWithSecret>(
+      `${this.base}/admin/users/${encodeURIComponent(username)}/reset-password`,
+      {}
+    );
+  }
+
   // ── WebSocket — real-time agent streaming ─────────────────────────────────
 
   connectAgentStream(reportId: string): Subject<AgentStep> {
@@ -149,11 +176,7 @@ export class ApiService {
     const wsUrl =
       environment.wsUrl +
       `/ws/${reportId}` +
-      (token
-        ? `?token=${encodeURIComponent(token)}`
-        : environment.apiKey
-          ? `?api_key=${encodeURIComponent(environment.apiKey)}`
-          : '');
+      (token ? `?token=${encodeURIComponent(token)}` : '');
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {

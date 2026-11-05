@@ -136,14 +136,14 @@ Edit `backend/.env` and set:
 - `GEMINI_MODEL` — defaults to `gemini-3.8-flash`. `gemini-2.5-flash` only works for API
   keys that have used it before, so new keys need a current model
 - `JWT_SECRET` — 32+ random characters: `python -c "import secrets; print(secrets.token_urlsafe(48))"`
-- `API_KEY` — a random string for the optional shared service key
 - `BOOTSTRAP_CLINICIAN_USERNAME` / `BOOTSTRAP_CLINICIAN_PASSWORD` (10+ characters) — your
   first account, created at startup. Optionally also `BOOTSTRAP_PATIENT_USERNAME`,
   `BOOTSTRAP_PATIENT_PASSWORD` and `BOOTSTRAP_PATIENT_PATIENT_ID` for a patient-portal demo.
 
-Then sign in with that account on the login screen. Leave `apiKey` blank in
-`frontend/src/environments/*.ts`; filling it in only enables a limited "service key"
-fallback that cannot approve reports (and bakes a secret into the bundle).
+Then sign in with that account on the login screen. To give a patient access, open
+**Accounts** in the sidebar: pick the patient, choose a username, and hand them the one-time
+temporary password; they must set their own at first sign-in. **Reset password** issues a new
+temporary one.
 
 ### 2. Backend
 
@@ -181,13 +181,12 @@ Run this from the **repository root** (the compose file lives at the root, not i
 `backend/`). It builds and runs the backend, frontend (served via Nginx, which also
 proxies API and WebSocket traffic to the backend), and a PostgreSQL database.
 
-`docker-compose.yml` requires `GEMINI_API_KEY`, `API_KEY`, `JWT_SECRET` and
+`docker-compose.yml` requires `GEMINI_API_KEY`, `JWT_SECRET` and
 `POSTGRES_PASSWORD` (no insecure defaults) — put them in a `.env` file at the repository root:
 
 ```bash
 # .env at repo root (used by docker-compose, separate from backend/.env)
 GEMINI_API_KEY=your-key-here
-API_KEY=your-generated-shared-secret
 JWT_SECRET=at-least-32-random-characters
 POSTGRES_PASSWORD=some-strong-password
 BOOTSTRAP_CLINICIAN_USERNAME=dr.example
@@ -210,7 +209,6 @@ See `backend/.env.example` for the full list and inline documentation. Key ones:
 |---|---|---|
 | `GEMINI_API_KEY` | yes | Gemini API access |
 | `JWT_SECRET` | yes (32+ chars) | Signs login tokens; unset = random per-process secret |
-| `API_KEY` | yes | Shared service key (role `service`; set `ALLOW_API_KEY_AUTH=false` to disable) |
 | `BOOTSTRAP_CLINICIAN_USERNAME` / `_PASSWORD` | first run | Creates the first clinician account |
 | `REQUIRE_CLINICIAN_REVIEW` | no | default `true`; `false` auto-approves (demo only) |
 | `ACCESS_TOKEN_MINUTES` | no | default 60 |

@@ -17,7 +17,7 @@ uvicorn main:app --reload
 ```
 
 Runs at `http://localhost:8000` — Swagger UI at `/docs`, health check at `/health`
-(the only unauthenticated endpoint besides `/auth/login`; everything else needs a Bearer token or `X-API-Key`).
+(the only unauthenticated endpoint besides `/auth/login`; everything else needs a Bearer token).
 
 ## Project layout
 

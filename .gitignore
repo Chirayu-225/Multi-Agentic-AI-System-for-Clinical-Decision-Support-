@@ -38,3 +38,6 @@ postgres_data/
 backend/eval/gold/*
 !backend/eval/gold/labels.example.json
 backend/eval/results/gold.json
+
+# Local patch files
+/*.patch

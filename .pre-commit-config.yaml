@@ -10,3 +10,10 @@ repos:
       - id: bandit
         args: ["-ll", "-r", "backend/src", "backend/main.py"]
         pass_filenames: false
+  - repo: local
+    hooks:
+      - id: no-databases-or-reports
+        name: block databases and sample reports (may contain patient data)
+        entry: "Refusing to commit a database or PDF - these can hold patient data. Keep it local (see .gitignore)."
+        language: fail
+        files: '\.(db|db-journal|sqlite3?|pdf)$'

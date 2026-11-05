@@ -13,9 +13,9 @@ const STORAGE_KEY = 'ama.session.v1';
 const MAX_TIMEOUT_MS = 2_147_000_000; // setTimeout upper bound (~24.8 days)
 
 interface StoredSession {
-  token: string | null;
+  token: string;
   user: AuthUser;
-  expiresAt: number | null; // epoch ms; null for the service-key session
+  expiresAt: number; // epoch ms
 }
 
 @Injectable({ providedIn: 'root' })
@@ -27,8 +27,8 @@ export class AuthService {
 
   readonly isAuthenticated = computed(() => this.user() !== null);
   readonly role = computed<Role | null>(() => this.user()?.role ?? null);
-  /** True when the build ships a service API key (limited-access fallback). */
-  readonly serviceKeyAvailable = !!environment.apiKey;
+  /** Signed in with a temporary password: only changing it is allowed until it is done. */
+  readonly mustChangePassword = computed(() => this.user()?.mustChangePassword === true);
 
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -44,28 +44,17 @@ export class AuthService {
   login(username: string, password: string): Observable<LoginResponse> {
     return this.http
       .post<LoginResponse>(`${environment.apiUrl}/auth/login`, { username, password })
-      .pipe(
-        tap((res) => {
-          const user: AuthUser = {
-            username: res.username,
-            role: res.role,
-            displayName: res.display_name || res.username,
-            patientId: res.patient_id ?? null,
-          };
-          const expiresAt = Date.now() + Math.max(0, res.expires_in) * 1000;
-          this.setSession(res.access_token, user, expiresAt);
-        })
-      );
+      .pipe(tap((res) => this.applySession(res)));
   }
 
-  /** Limited fallback: act with the shared service key (no JWT, no review rights). */
-  useServiceKey(): void {
-    if (!environment.apiKey) return;
-    this.setSession(
-      null,
-      { username: 'service', role: 'service', displayName: 'Service key', patientId: null },
-      null
-    );
+  /** Change your own password. On success the server returns a fresh, unrestricted token. */
+  changePassword(currentPassword: string, newPassword: string): Observable<LoginResponse> {
+    return this.http
+      .post<LoginResponse>(`${environment.apiUrl}/auth/change-password`, {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+      .pipe(tap((res) => this.applySession(res)));
   }
 
   logout(): void {
@@ -81,10 +70,18 @@ export class AuthService {
 
   // ── internals ─────────────────────────────────────────────────────────────
 
-  private setSession(token: string | null, user: AuthUser, expiresAt: number | null): void {
-    this.token.set(token);
+  private applySession(res: LoginResponse): void {
+    const user: AuthUser = {
+      username: res.username,
+      role: res.role,
+      displayName: res.display_name || res.username,
+      patientId: res.patient_id ?? null,
+      mustChangePassword: res.must_change_password === true,
+    };
+    const expiresAt = Date.now() + Math.max(0, res.expires_in) * 1000;
+    this.token.set(res.access_token);
     this.user.set(user);
-    this.persist({ token, user, expiresAt });
+    this.persist({ token: res.access_token, user, expiresAt });
     this.scheduleExpiry(expiresAt);
   }
 
@@ -108,30 +105,21 @@ export class AuthService {
       const s = JSON.parse(raw) as Partial<StoredSession>;
       const u = s.user;
       const validUser =
-        !!u && typeof u.username === 'string' &&
-        (u.role === 'clinician' || u.role === 'patient' || u.role === 'service');
+        !!u && typeof u.username === 'string' && (u.role === 'clinician' || u.role === 'patient');
       if (!validUser) throw new Error('malformed');
-
-      if (u!.role === 'service') {
-        if (!environment.apiKey) throw new Error('service key not configured');
-        this.token.set(null);
-        this.user.set(u!);
-        return;
-      }
       if (typeof s.token !== 'string' || typeof s.expiresAt !== 'number' || s.expiresAt <= Date.now()) {
         throw new Error('expired');
       }
       this.token.set(s.token);
-      this.user.set(u!);
+      this.user.set({ ...u!, mustChangePassword: u!.mustChangePassword === true });
       this.scheduleExpiry(s.expiresAt);
     } catch {
       this.logout();
     }
   }
 
-  private scheduleExpiry(expiresAt: number | null): void {
+  private scheduleExpiry(expiresAt: number): void {
     this.clearTimer();
-    if (expiresAt === null) return;
     const ms = Math.min(Math.max(expiresAt - Date.now(), 0), MAX_TIMEOUT_MS);
     this.expiryTimer = setTimeout(() => this.logout(), ms);
   }

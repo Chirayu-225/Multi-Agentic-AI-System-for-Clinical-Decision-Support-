@@ -19,7 +19,6 @@ from src.security.deidentification import build_redaction_map
 
 CLIN = ("dr.rao", "Str0ng-Clinician-Pw!")
 PAT = ("priya", "Str0ng-Patient-Pw!")
-API_KEY = "test-service-key"
 # The fixture summary contains an ungrounded number (8.4), so approval needs an explicit
 # acknowledgement of that warning — see tests/test_review_flow.py for the gate itself.
 APPROVE = {"decision": "approve", "acknowledge_warnings": True}
@@ -309,25 +308,6 @@ def test_patient_forbidden_from_staff_actions(client):
     assert client.post("/report/x/review", headers=ph, json=APPROVE).status_code == 403
 
 
-def test_service_key_can_upload_but_never_review_or_read_audit(client):
-    sh = {"X-API-Key": API_KEY}
-    r = upload(client, sh)
-    assert r.status_code == 200
-    rid = r.json()["report_id"]
-    assert client.post(f"/report/{rid}/review", headers=sh, json=APPROVE).status_code == 403
-    assert client.get("/admin/audit", headers=sh).status_code == 403
-    assert client.get("/admin/metrics", headers=sh).status_code == 403
-
-
-def test_api_key_auth_can_be_disabled(client, monkeypatch):
-    monkeypatch.setenv("ALLOW_API_KEY_AUTH", "false")
-    assert client.get("/patients", headers={"X-API-Key": API_KEY}).status_code == 401
-
-
-def test_wrong_api_key_rejected(client):
-    assert client.get("/patients", headers={"X-API-Key": "nope"}).status_code == 401
-
-
 def test_reject_requires_reason_and_hides_from_patient(client):
     ch, ph = login(client, CLIN), login(client, PAT)
     rid = upload(client, ch).json()["report_id"]
@@ -539,18 +519,19 @@ def test_security_headers_present(client):
 def test_websocket_rejects_patients_and_anonymous(client):
     from starlette.websockets import WebSocketDisconnect
     ph = login(client, PAT)["Authorization"].split()[1]
-    for url in ("/ws/abc", f"/ws/abc?token={ph}", "/ws/abc?api_key=wrong"):
+    for url in ("/ws/abc", f"/ws/abc?token={ph}", "/ws/abc?token=garbage", "/ws/abc?api_key=anything"):
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect(url):
                 pass
-    with client.websocket_connect(f"/ws/abc?api_key={API_KEY}") as ws:
+    ch = login(client, CLIN)["Authorization"].split()[1]
+    with client.websocket_connect(f"/ws/abc?token={ch}") as ws:
         assert ws is not None
 
 
 def test_delete_patient_is_clinician_only_and_audited(client):
     ch = login(client, CLIN)
     upload(client, ch)
-    assert client.delete("/patient/P001", headers={"X-API-Key": API_KEY}).status_code == 403
+    assert client.delete("/patient/P001", headers=login(client, PAT)).status_code == 403
     assert client.delete("/patient/P001", headers=ch).status_code == 200
     assert any(e["action"] == "patient.delete" for e in client.get("/admin/audit", headers=ch).json()["events"])
 
@@ -559,4 +540,3 @@ def test_suite_ignores_developer_dotenv():
     """A real backend/.env must never leak into the test run (it broke 3 auth tests on Windows)."""
     import os
     assert os.environ["MEDSIGHT_SKIP_DOTENV"] == "1"
-    assert os.environ["API_KEY"] == API_KEY

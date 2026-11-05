@@ -22,6 +22,65 @@ import { errorMessage } from '../../services/error-message';
           </div>
         </div>
 
+        @if (auth.mustChangePassword()) {
+          <form (ngSubmit)="submitChange()" class="bg-gray-900 border border-gray-800 rounded-2xl p-6
+                                                   shadow-lg shadow-black/30" autocomplete="off">
+            <h1 class="text-lg font-semibold text-white mb-1">Choose a new password</h1>
+            <p class="text-xs text-gray-500 mb-5">
+              You signed in with a temporary password. Set your own to continue (at least 10 characters).
+            </p>
+
+            <label for="cp-current"
+                   class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              Temporary password
+            </label>
+            <input id="cp-current" name="current" type="password" [(ngModel)]="currentPassword"
+                   autocomplete="current-password" required
+                   class="w-full bg-gray-950 border border-gray-700 rounded-lg px-4 py-2.5 mb-4
+                          text-gray-200 text-sm focus:outline-none focus:border-blue-500
+                          focus:ring-1 focus:ring-blue-500 transition-colors" />
+
+            <label for="cp-new"
+                   class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              New password
+            </label>
+            <input id="cp-new" name="new" type="password" [(ngModel)]="newPassword"
+                   autocomplete="new-password" required minlength="10"
+                   class="w-full bg-gray-950 border border-gray-700 rounded-lg px-4 py-2.5 mb-4
+                          text-gray-200 text-sm focus:outline-none focus:border-blue-500
+                          focus:ring-1 focus:ring-blue-500 transition-colors" />
+
+            <label for="cp-confirm"
+                   class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              Confirm new password
+            </label>
+            <input id="cp-confirm" name="confirm" type="password" [(ngModel)]="confirmPassword"
+                   autocomplete="new-password" required
+                   class="w-full bg-gray-950 border border-gray-700 rounded-lg px-4 py-2.5 mb-4
+                          text-gray-200 text-sm focus:outline-none focus:border-blue-500
+                          focus:ring-1 focus:ring-blue-500 transition-colors" />
+
+            @if (error()) {
+              <div role="alert"
+                   class="mb-4 rounded-lg p-3 border border-red-500/40 bg-red-500/10 text-sm text-red-300">
+                {{ error() }}
+              </div>
+            }
+
+            <button type="submit" [disabled]="!canChange() || loading()"
+                    class="w-full py-2.5 rounded-lg font-semibold text-sm tracking-wide transition-all
+                           bg-gradient-to-r from-blue-600 to-sky-500 text-white
+                           hover:shadow-lg hover:shadow-blue-500/25
+                           disabled:opacity-40 disabled:cursor-not-allowed">
+              {{ loading() ? 'Saving...' : 'Set password and continue' }}
+            </button>
+            <button type="button" (click)="cancelChange()"
+                    class="w-full mt-4 text-xs text-gray-500 hover:text-gray-300 underline
+                           underline-offset-2 transition-colors">
+              Sign out
+            </button>
+          </form>
+        } @else {
         <form (ngSubmit)="submit()" class="bg-gray-900 border border-gray-800 rounded-2xl p-6
                                            shadow-lg shadow-black/30" autocomplete="on">
           <h1 class="text-lg font-semibold text-white mb-1">Sign in</h1>
@@ -63,14 +122,8 @@ import { errorMessage } from '../../services/error-message';
             {{ loading() ? 'Signing in...' : 'Sign in' }}
           </button>
 
-          @if (auth.serviceKeyAvailable) {
-            <button type="button" (click)="auth.useServiceKey()"
-                    class="w-full mt-4 text-xs text-gray-500 hover:text-gray-300 underline
-                           underline-offset-2 transition-colors">
-              Continue with service key (limited access: cannot approve reports)
-            </button>
-          }
         </form>
+        }
       </div>
     </div>
   `,
@@ -78,10 +131,43 @@ import { errorMessage } from '../../services/error-message';
 export class LoginComponent {
   username = '';
   password = '';
+  currentPassword = '';
+  newPassword = '';
+  confirmPassword = '';
   loading = signal(false);
   error = signal<string | null>(null);
 
   constructor(public auth: AuthService) {}
+
+  canChange(): boolean {
+    return !!this.currentPassword && this.newPassword.length >= 10 && this.newPassword === this.confirmPassword;
+  }
+
+  submitChange(): void {
+    if (!this.canChange() || this.loading()) return;
+    if (this.newPassword === this.currentPassword) {
+      this.error.set('Choose a password different from the temporary one.');
+      return;
+    }
+    this.loading.set(true);
+    this.error.set(null);
+    this.auth.changePassword(this.currentPassword, this.newPassword).subscribe({
+      next: () => {
+        this.loading.set(false);
+        this.currentPassword = this.newPassword = this.confirmPassword = '';
+      },
+      error: (err) => {
+        this.loading.set(false);
+        this.error.set(errorMessage(err, 'Could not change the password. Try again.'));
+      },
+    });
+  }
+
+  cancelChange(): void {
+    this.currentPassword = this.newPassword = this.confirmPassword = '';
+    this.error.set(null);
+    this.auth.logout();
+  }
 
   submit(): void {
     if (!this.username || !this.password || this.loading()) return;

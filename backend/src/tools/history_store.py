@@ -4,6 +4,7 @@ ChromaDB patient history store — same logic as the prior single-agent version,
 adapted to the new project structure.
 """
 import json
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,22 +18,29 @@ DB_PATH.mkdir(parents=True, exist_ok=True)
 
 _client = None
 _embedder = None
+# These run in worker threads (see tool_registry.py); the lock stops two first requests
+# from each building their own client / loading the embedding model.
+_init_lock = threading.Lock()
 
 
 def _get_client():
     global _client
     if _client is None:
-        _client = chromadb.PersistentClient(
-            path=str(DB_PATH),
-            settings=Settings(anonymized_telemetry=False),
-        )
+        with _init_lock:
+            if _client is None:
+                _client = chromadb.PersistentClient(
+                    path=str(DB_PATH),
+                    settings=Settings(anonymized_telemetry=False),
+                )
     return _client
 
 
 def _get_embedder():
     global _embedder
     if _embedder is None:
-        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        with _init_lock:
+            if _embedder is None:
+                _embedder = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedder
 
 

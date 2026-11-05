@@ -88,3 +88,13 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  no-tracked-patient-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if a database or PDF is tracked
+        run: |
+          if git ls-files | grep -iE '\.(db|db-journal|sqlite3?|pdf)$'; then
+            echo "A database or PDF is tracked by git - these can hold patient data."; exit 1
+          fi

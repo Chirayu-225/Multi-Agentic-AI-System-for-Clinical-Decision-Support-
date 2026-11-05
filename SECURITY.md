@@ -39,9 +39,10 @@ before citing; it is revised periodically).
 - **Accounts and roles.** JWT bearer login (HS256, algorithm pinned, issuer and expiry
   required, per-token `jti`). Roles: **clinician** (everything, and the only role that can
   approve/reject, read the audit log or metrics, or delete a patient), **patient** (read
-  only, bound to one `patient_id`, sees approved reports only), **service** (the legacy
-  shared `X-API-Key`: may upload and read, can never approve or read audit data;
-  disable with `ALLOW_API_KEY_AUTH=false`).
+  only, bound to one `patient_id`, sees approved reports only). There is no shared API key:
+  every action is attributable to a named person. Clinicians create patient accounts
+  (`POST /admin/users`) and reset forgotten passwords; both issue a one-time temporary
+  password, and the resulting token can do nothing except `POST /auth/change-password`.
 - **Passwords.** scrypt with per-user salt, constant-time verification with a dummy hash
   for unknown users (no user enumeration by timing), minimum length 10, lockout for 15
   minutes after 5 failures (HTTP 423), and per-IP and per-username login rate limits.
@@ -122,8 +123,12 @@ CI gates: `pip-audit` (fails on anything new), `npm audit --omit=dev --audit-lev
   token in `sessionStorage`, so an XSS bug would expose it; hence the CI sink check.
   A production system would use short-lived tokens with a refresh/revocation list or
   httpOnly cookies.
-- **The shared service key** is a bearer secret that, if baked into a frontend bundle, is
-  public. Leave it out of the production build and set `ALLOW_API_KEY_AUTH=false`.
+- **Tokens are not revocable and a reset does not end existing sessions.** Resetting a
+  patient's password does not invalidate a token they already hold (up to
+  `ACCESS_TOKEN_MINUTES`). Fixing this needs a per-user token version or a revocation list.
+- **Only patients can be created or reset through the API.** There is no admin role yet, so
+  one clinician cannot create or reset another clinician; clinician accounts come from the
+  `BOOTSTRAP_CLINICIAN_*` settings.
 - **Evaluation data is synthetic and self-authored.** The numbers show where logic holds
   or breaks on controlled inputs; they are not clinical validation, and not a benchmark
   against third-party data.

@@ -3,7 +3,8 @@ main.py
 Agentic Medical Assistant — FastAPI backend.
 
 Endpoints
-  Auth        POST /auth/login · GET /auth/me
+  Auth        POST /auth/login · GET /auth/me · POST /auth/change-password
+  Accounts    GET/POST /admin/users · POST /admin/users/{username}/reset-password
   Pipeline    POST /report/upload · WS /ws/{report_id}
   Review      POST /report/{id}/review · GET /reviews/pending
   Reports     GET /report/{id} · POST /report/{id}/translate · GET /report/{id}/fhir
@@ -17,6 +18,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import time
 import uuid
@@ -28,7 +30,7 @@ from typing import Literal
 # src.* imports below — src/llm.py reads GEMINI_MODEL at import time, so
 # .env must be loaded before those imports run.
 # Tests set MEDSIGHT_SKIP_DOTENV=1 (tests/conftest.py): with override=True, a developer's real
-# backend/.env would otherwise replace the test values (API_KEY, JWT_SECRET...) and fail the
+# backend/.env would otherwise replace the test values (JWT_SECRET...) and fail the
 # auth tests on any machine that has one.
 from dotenv import load_dotenv
 if os.getenv("MEDSIGHT_SKIP_DOTENV") != "1":
@@ -54,7 +56,7 @@ from src.tools.history_store import (store_report as chroma_store, delete_patien
                                      delete_report_history)
 from src.tools.trend_series import build_trend_series
 from src.api import auth as authmod
-from src.api.auth import (Principal, ROLE_CLINICIAN, ROLE_PATIENT, ROLE_SERVICE,
+from src.api.auth import (Principal, ROLE_CLINICIAN, ROLE_PATIENT,
                           get_principal, require_roles, verify_ws_auth, fingerprint)
 from src.security import audit
 from src.security.passwords import (DUMMY_HASH, WeakPassword, hash_password,
@@ -99,7 +101,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_origin_regex=_localhost_regex,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["X-API-Key", "Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -136,8 +138,6 @@ async def startup():
     # Fail fast and loud on missing secrets rather than 500ing on first
     # request — much easier to diagnose in a demo / interview setting.
     required = ["GEMINI_API_KEY"]
-    if os.getenv("ALLOW_API_KEY_AUTH", "true").lower() != "false":
-        required.append("API_KEY")
     missing = [v for v in required if not os.getenv(v)]
     if missing:
         raise RuntimeError(
@@ -235,18 +235,152 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     user.locked_until = None
     user.last_login_at = now
     db.commit()
-    token, ttl = authmod.create_access_token(username=user.username, role=user.role,
-                                             patient_id=user.patient_id)
     audit.record(actor=user.username, role=user.role, action="auth.login", ip=ip)
+    return _session_payload(user)
+
+
+def _session_payload(user: User) -> dict:
+    """Token + profile returned by login and by a password change. A user whose password is
+    temporary gets a token that works for nothing except /auth/change-password."""
+    must_change = bool(user.must_change_password)
+    token, ttl = authmod.create_access_token(username=user.username, role=user.role,
+                                             patient_id=user.patient_id,
+                                             must_change_password=must_change)
     return {"access_token": token, "token_type": "bearer", "expires_in": ttl,
             "role": user.role, "username": user.username,
-            "display_name": user.display_name or user.username, "patient_id": user.patient_id}
+            "display_name": user.display_name or user.username, "patient_id": user.patient_id,
+            "must_change_password": must_change}
 
 
 @app.get("/auth/me")
 def whoami(principal: Principal = Depends(get_principal)):
     return {"username": principal.subject, "role": principal.role,
-            "patient_id": principal.patient_id, "via": principal.via}
+            "patient_id": principal.patient_id, "via": principal.via,
+            "must_change_password": principal.must_change_password}
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
+
+
+@app.post("/auth/change-password")
+def change_password(body: ChangePasswordIn, request: Request, db: Session = Depends(get_db),
+                    principal: Principal = Depends(get_principal)):
+    """Change your own password. Also the only call a temporary-password token may make;
+    on success the temporary flag is cleared and a fresh, unrestricted token is returned.
+    Uses get_principal (not require_roles) on purpose, see api/auth.py."""
+    ip = _ip(request)
+    # A stolen token must not become an unlimited oracle for guessing the current password.
+    ok, retry = rate_limit_allow(f"chpw:{principal.subject}", 5, 900)
+    if not ok:
+        audit.record(actor=principal.subject, role=principal.role, action="auth.password_change_throttled",
+                     outcome="denied", ip=ip)
+        raise HTTPException(429, f"Too many attempts. Retry in {retry}s.", headers={"Retry-After": str(retry)})
+
+    user = db.query(User).filter(User.username == principal.subject).first()
+    if not user or not user.is_active:
+        raise HTTPException(401, "Invalid or expired token.", headers={"WWW-Authenticate": "Bearer"})
+    # 400 (not 401/403): the frontend treats any 401 as "session over" and signs the user out.
+    if not verify_password(body.current_password, user.password_hash):
+        audit.record(actor=user.username, role=user.role, action="auth.password_change_failed",
+                     outcome="denied", ip=ip)
+        raise HTTPException(400, "Current password is incorrect.")
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "Choose a password different from the current one.")
+    try:
+        validate_password_strength(body.new_password)
+    except WeakPassword as e:
+        raise HTTPException(400, str(e))
+
+    user.password_hash = hash_password(body.new_password)
+    user.must_change_password = False
+    user.failed_logins = 0
+    user.locked_until = None
+    db.commit()
+    audit.record(actor=user.username, role=user.role, action="auth.password_changed", ip=ip)
+    return _session_payload(user)
+
+
+# ── Patient accounts (created and reset by clinicians) ─────────────────────────
+
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+# No 0/O, 1/l/I: a temporary password is read aloud or copied by hand.
+_TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+
+
+def _temporary_password() -> str:
+    return "".join(secrets.choice(_TEMP_PASSWORD_ALPHABET) for _ in range(14))
+
+
+class CreatePatientAccountIn(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    patient_id: str = Field(min_length=1, max_length=64)
+    display_name: str | None = Field(default=None, max_length=100)
+
+
+def _account_view(u: User) -> dict:
+    return {"username": u.username, "display_name": u.display_name or u.username,
+            "patient_id": u.patient_id, "is_active": bool(u.is_active),
+            "must_change_password": bool(u.must_change_password),
+            "last_login_at": _iso(u.last_login_at)}
+
+
+@app.get("/admin/users")
+def list_patient_accounts(db: Session = Depends(get_db),
+                          principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    rows = db.query(User).filter(User.role == ROLE_PATIENT).order_by(User.username).all()
+    return {"users": [_account_view(u) for u in rows]}
+
+
+@app.post("/admin/users", status_code=201)
+def create_patient_account(body: CreatePatientAccountIn, request: Request, db: Session = Depends(get_db),
+                           principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """A clinician creates a login for a patient, bound to ONE existing patient_id. The
+    temporary password is returned once, here, and is never stored in clear. The patient
+    must change it at first sign-in. Clinician accounts are not created through the API."""
+    username = body.username.strip().lower()
+    if not USERNAME_RE.match(username):
+        raise HTTPException(422, "Username must be 3-64 characters: lowercase letters, digits, '.', '_' or '-'.")
+    patient_id = _valid_patient_id(body.patient_id.strip())
+    # Must already exist: a typo here would give someone access to a different person's reports.
+    if not db.query(Patient).filter(Patient.id == patient_id).first():
+        raise HTTPException(404, "No patient with this ID. Upload one of their reports first.")
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(409, "That username is already taken.")
+
+    temp = _temporary_password()
+    audit.record(actor=principal.subject, role=principal.role, action="user.create",
+                 resource=f"user:{username}", ip=_ip(request), critical=True,
+                 detail={"role": ROLE_PATIENT, "patient_id": patient_id})
+    user = User(username=username, display_name=(body.display_name or "").strip() or username,
+                password_hash=hash_password(temp), role=ROLE_PATIENT, patient_id=patient_id,
+                must_change_password=True)
+    db.add(user)
+    db.commit()
+    return {**_account_view(user), "temporary_password": temp,
+            "note": "Shown once. Give it to the patient securely; they must change it at first sign-in."}
+
+
+@app.post("/admin/users/{username}/reset-password")
+def reset_patient_password(username: str, request: Request, db: Session = Depends(get_db),
+                           principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """Forgotten password: issue a new temporary one, unlock the account, force a change.
+    Patient accounts only (there is no admin role yet, so one clinician cannot reset another)."""
+    user = db.query(User).filter(User.username == username.strip().lower()).first()
+    if not user or user.role != ROLE_PATIENT:
+        raise HTTPException(404, "No patient account with that username.")
+    temp = _temporary_password()
+    audit.record(actor=principal.subject, role=principal.role, action="user.password_reset",
+                 resource=f"user:{user.username}", ip=_ip(request), critical=True,
+                 detail={"patient_id": user.patient_id})
+    user.password_hash = hash_password(temp)
+    user.must_change_password = True
+    user.failed_logins = 0
+    user.locked_until = None
+    db.commit()
+    return {**_account_view(user), "temporary_password": temp,
+            "note": "Shown once. Give it to the patient securely; they must change it at first sign-in."}
 
 
 # ── WebSocket — real-time agent streaming ──────────────────────────────────────
@@ -258,7 +392,7 @@ async def websocket_endpoint(websocket: WebSocket, report_id: str):
     accounts have no business watching the analysis pipeline).
 
     Auth: browsers' native WebSocket API can't set custom headers, so the credential
-    travels as a query param instead: `?token=<JWT>` or `?api_key=...`. Use wss://
+    travels as a query param instead: `?token=<JWT>`. Use wss://
     in any non-local deployment so the query string is encrypted in transit.
     """
     principal = await verify_ws_auth(websocket)
@@ -429,7 +563,7 @@ async def upload_report(
     report_id: str = Form(default=""),
     language: str = Form(default="en"),
     db: Session = Depends(get_db),
-    principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_SERVICE)),
+    principal: Principal = Depends(require_roles(ROLE_CLINICIAN)),
 ):
     started = time.monotonic()
     models_used = begin_model_tracking()   # every model that answers during this upload
@@ -502,7 +636,7 @@ async def upload_report(
                 f"Verify every value against the original document."
             )
         if ext in PDF_EXTS:
-            security_extra += detect_hidden_pdf_text(tmp_path)
+            security_extra += await asyncio.to_thread(detect_hidden_pdf_text, tmp_path)
 
         # ── Step 2: Orchestrator agent (tool calling + ReAct) ──────────────
         ws_callback = _make_ws_callback(report_id)
@@ -707,7 +841,9 @@ async def upload_report(
         # The report is already saved above, so a failure here must not become a 500 — the
         # clinician would re-upload and create a duplicate. Record it on the report instead.
         try:
-            chroma_store(
+            # Embedding + vector write are blocking; keep them off the event loop.
+            await asyncio.to_thread(
+                chroma_store,
                 patient_id=patient_id, report_text=redact(raw_text, redaction_map), lab_values=lab_values,
                 report_date=clean_date, report_id=report_id,
             )
@@ -762,6 +898,20 @@ class ReviewIn(BaseModel):
     acknowledge_warnings: bool = False
 
 
+# Review state machine. pending -> approved | rejected; approved -> rejected (retracting a
+# release); rejected is final, because rejecting removes the report from the patient's
+# history store and an approval could not put it back. Re-upload the report instead.
+_ALLOWED_REVIEW_TRANSITIONS = {
+    "pending_review": {"approved", "rejected"},
+    "approved": {"rejected"},
+    "rejected": set(),
+}
+_REVIEW_TRANSITION_HELP = {
+    "approved": "It has already been released; you can only retract it by rejecting it.",
+    "rejected": "Rejection is final; upload the report again to have it reviewed.",
+}
+
+
 def _review_warnings(r: Report) -> list[str]:
     """Everything a clinician must explicitly accept before a report can be released.
     Without this gate the warnings were logged but approval was one click either way —
@@ -782,7 +932,9 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
     """Approve or reject an AI-generated report. Clinician accounts only: the shared
     service key is deliberately NOT accepted, so every release decision is attributable
     to a named person."""
-    r = db.query(Report).filter(Report.id == report_id).first()
+    # FOR UPDATE locks the row on PostgreSQL so two clinicians deciding at once are serialised
+    # (the second one then sees the new status and gets the 409 below). SQLite ignores it.
+    r = db.query(Report).filter(Report.id == report_id).with_for_update().first()
     if not r:
         raise HTTPException(404, "Report not found.")
     if body.decision == "reject" and len(body.note.strip()) < 3:
@@ -790,6 +942,12 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
 
     previous = _effective_status(r)
     new_status = "approved" if body.decision == "approve" else "rejected"
+    if new_status not in _ALLOWED_REVIEW_TRANSITIONS.get(previous, set()):
+        raise HTTPException(409, detail={
+            "message": f"A report that is '{previous}' cannot be {new_status}. "
+                       + _REVIEW_TRANSITION_HELP.get(previous, ""),
+            "current_status": previous,
+        })
     warnings = _review_warnings(r)
     if body.decision == "approve" and warnings and not body.acknowledge_warnings:
         raise HTTPException(409, detail={
@@ -904,7 +1062,7 @@ def export_pending_reviews_pdf(request: Request, include_names: bool = False,
 
 @app.get("/report/{report_id}")
 def get_report(report_id: str, request: Request, db: Session = Depends(get_db),
-               principal: Principal = Depends(get_principal)):
+               principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_PATIENT))):
     r = _load_report_for(principal, report_id, db)
     audit.record(actor=principal.subject, role=principal.role, action="report.view",
                  resource=f"report:{report_id}", ip=_ip(request), detail={"patient_id": r.patient_id})
@@ -916,7 +1074,8 @@ def get_report(report_id: str, request: Request, db: Session = Depends(get_db),
 @app.post("/report/{report_id}/translate")
 async def translate_report(report_id: str, request: Request,
                            language: str = Query(..., min_length=2, max_length=5),
-                           db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
+                           db: Session = Depends(get_db),
+                           principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_PATIENT))):
     """Translate the plain-language patient summary on demand. The text is
     de-identified again before it reaches Gemini, exactly like the main pipeline."""
     language = language.lower()
@@ -949,7 +1108,7 @@ async def translate_report(report_id: str, request: Request,
 @app.get("/report/{report_id}/fhir")
 def export_fhir(report_id: str, request: Request, include_name: bool = False,
                 db: Session = Depends(get_db),
-                principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_SERVICE))):
+                principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
     r = db.query(Report).filter(Report.id == report_id).first()
     if not r:
         raise HTTPException(404, "Report not found.")
@@ -976,7 +1135,7 @@ def _visible_reports(principal: Principal, patient_id: str, db: Session) -> list
 
 @app.get("/patient/{patient_id}/history")
 def patient_history(patient_id: str, request: Request, db: Session = Depends(get_db),
-                    principal: Principal = Depends(get_principal)):
+                    principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_PATIENT))):
     _assert_patient_scope(principal, patient_id)
     reports = _visible_reports(principal, patient_id, db)
     audit.record(actor=principal.subject, role=principal.role, action="patient.history_view",
@@ -1001,7 +1160,7 @@ def patient_history(patient_id: str, request: Request, db: Session = Depends(get
 
 @app.get("/patient/{patient_id}/trends")
 def patient_trends(patient_id: str, db: Session = Depends(get_db),
-                   principal: Principal = Depends(get_principal)):
+                   principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_PATIENT))):
     """Chart-ready lab series (with the ICMR reference band) across a patient's reports."""
     _assert_patient_scope(principal, patient_id)
     reports = _visible_reports(principal, patient_id, db)
@@ -1024,7 +1183,7 @@ def my_reports(db: Session = Depends(get_db),
 
 @app.get("/patients")
 def list_patients(db: Session = Depends(get_db),
-                  principal: Principal = Depends(require_roles(ROLE_CLINICIAN, ROLE_SERVICE))):
+                  principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
     patients = db.query(Patient).all()
     return {"patients": [p.id for p in patients]}
 

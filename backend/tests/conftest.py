@@ -21,7 +21,6 @@ if str(BACKEND) not in sys.path:
 # Never read the developer's real backend/.env during tests (see main.py).
 os.environ["MEDSIGHT_SKIP_DOTENV"] = "1"
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
-os.environ.setdefault("API_KEY", "test-service-key")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-production-0123456789")
 # Hard-set, never setdefault: the API tests DROP ALL TABLES between tests. A DATABASE_URL
 # inherited from the shell or .env once pointed them at the real medsight.db and wiped it.

@@ -6,6 +6,8 @@ Extracts: patient info, diagnoses, medications,
 lab values with units, dates, doctor names.
 """
 
+import threading
+
 from gliner import GLiNER
 import re
 
@@ -84,13 +86,18 @@ def _clean_lab_name(raw: str) -> str:
     return raw.lower().strip()
 
 _model = None
+_model_lock = threading.Lock()
 
 
 def _get_model():
     global _model
     if _model is None:
-        # urchade/gliner_mediumv2.1 is a good balance of size and accuracy
-        _model = GLiNER.from_pretrained("urchade/gliner_mediumv2.1")
+        # Extraction runs in worker threads: without the lock two concurrent first requests
+        # would each load the (large) model.
+        with _model_lock:
+            if _model is None:
+                # urchade/gliner_mediumv2.1 is a good balance of size and accuracy
+                _model = GLiNER.from_pretrained("urchade/gliner_mediumv2.1")
     return _model
 
 

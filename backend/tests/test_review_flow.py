@@ -96,3 +96,34 @@ def test_metrics_report_review_quality(client):
     assert round(m["rejection_rate"], 2) == 0.33
     assert m["approved_with_acknowledged_warnings"] == 2
     assert m["median_minutes_to_review"] is not None
+
+# ── State machine: a decision can't be silently flipped or repeated ─────────────────────
+
+def test_cannot_approve_twice(client):
+    ch, rid = _upload(client)
+    assert client.post(f"/report/{rid}/review", headers=ch, json={
+        "decision": "approve", "acknowledge_warnings": True}).status_code == 200
+    again = client.post(f"/report/{rid}/review", headers=ch, json={
+        "decision": "approve", "acknowledge_warnings": True,
+        "edited_patient_summary": "Quietly changed after release."})
+    assert again.status_code == 409 and again.json()["detail"]["current_status"] == "approved"
+    # the released text was not altered by the refused request
+    assert client.get(f"/report/{rid}", headers=ch).json()["review"]["edited"] is False
+
+
+def test_rejection_is_final(client):
+    ch, rid = _upload(client)
+    assert client.post(f"/report/{rid}/review", headers=ch,
+                       json={"decision": "reject", "note": "wrong patient"}).status_code == 200
+    for body in ({"decision": "approve", "acknowledge_warnings": True},
+                 {"decision": "reject", "note": "again"}):
+        r = client.post(f"/report/{rid}/review", headers=ch, json=body)
+        assert r.status_code == 409 and r.json()["detail"]["current_status"] == "rejected"
+    assert client.get(f"/report/{rid}", headers=ch).json()["review"]["status"] == "rejected"
+
+
+def test_approved_report_can_still_be_retracted(client):
+    ch, rid = _upload(client)
+    client.post(f"/report/{rid}/review", headers=ch, json={"decision": "approve", "acknowledge_warnings": True})
+    r = client.post(f"/report/{rid}/review", headers=ch, json={"decision": "reject", "note": "retracted"})
+    assert r.status_code == 200 and r.json()["status"] == "rejected"

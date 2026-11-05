@@ -3,18 +3,21 @@ src/api/auth.py
 
 Authentication and authorization for the Agentic Medical Assistant.
 
-Two ways to authenticate, resolved into one `Principal`:
+Every caller is a named user account. POST /auth/login exchanges a username and password
+for a short-lived JWT (`Authorization: Bearer <JWT>`), which `get_principal` resolves into
+one `Principal`:
 
-  1. Named user account  -> `Authorization: Bearer <JWT>` (issued by POST /auth/login)
-       role "clinician": full access, the ONLY role that may approve/reject a report,
-                         read the audit log, delete a patient
-       role "patient"  : read-only, bound to ONE patient_id, sees APPROVED reports only
+  role "clinician": full access, the ONLY role that may upload, approve/reject a report,
+                    read the audit log, delete a patient, or create/reset patient accounts
+  role "patient"  : read-only, bound to ONE patient_id, sees APPROVED reports only
 
-  2. Shared service key  -> `X-API-Key: <API_KEY>`   (kept so scripts / the original
-       frontend keep working; disable with ALLOW_API_KEY_AUTH=false)
-       role "service"  : may upload and read, but can NEVER approve a report or read
-                         the audit log - a release decision must be attributable to a
-                         named human, and a shared secret is not a person.
+There is deliberately no shared secret or "service" role: a release decision (and every
+other action) must be attributable to a named human.
+
+Forced password change: accounts created or reset by a clinician carry a temporary
+password. Their token has the `pwc` claim, `Principal.must_change_password` is True, and
+`require_roles` refuses every endpoint except the ones that use `get_principal` directly
+(/auth/me, /auth/change-password). Changing the password issues a fresh, unrestricted token.
 
 Why a JWT and not server sessions: the API is stateless and the Angular client is a
 separate origin. Tradeoff accepted and documented in SECURITY.md: tokens cannot be
@@ -22,12 +25,11 @@ revoked before they expire (keep ACCESS_TOKEN_MINUTES short), and the SPA keeps 
 token in sessionStorage, so an XSS bug would expose it - which is why the frontend
 never renders model output with innerHTML (OWASP LLM10).
 
-WebSocket: browsers cannot set headers on a WebSocket, so the credential travels as a
-`token` (JWT) or `api_key` query parameter. Use wss:// outside local development.
+WebSocket: browsers cannot set headers on a WebSocket, so the JWT travels as a `token`
+query parameter. Use wss:// outside local development.
 """
 
 import hashlib
-import hmac
 import logging
 import os
 import secrets
@@ -47,21 +49,21 @@ MIN_SECRET_LENGTH = 32
 
 ROLE_CLINICIAN = "clinician"
 ROLE_PATIENT = "patient"
-ROLE_SERVICE = "service"
 
 
 # ── Principal ──────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Principal:
-    subject: str            # username, or "service:<fingerprint>"
-    role: str               # clinician | patient | service
+    subject: str            # username
+    role: str               # clinician | patient
     patient_id: str | None  # set for role == patient
-    via: str                # "jwt" | "api_key"
+    via: str = "jwt"
+    must_change_password: bool = False   # temporary password: only /auth/change-password works
 
     @property
     def is_staff(self) -> bool:
-        return self.role in (ROLE_CLINICIAN, ROLE_SERVICE)
+        return self.role == ROLE_CLINICIAN
 
 
 # ── Secrets ────────────────────────────────────────────────────────────────────
@@ -96,31 +98,11 @@ def validate_auth_config() -> None:
     _jwt_secret()
 
 
-def _configured_api_key() -> str:
-    key = os.getenv("API_KEY", "")
-    if not key:
-        # Fail CLOSED: an unconfigured secret must never mean "auth disabled".
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "Server misconfiguration: API_KEY is not set.",
-        )
-    return key
-
-
-def _api_key_auth_allowed() -> bool:
-    return os.getenv("ALLOW_API_KEY_AUTH", "true").lower() != "false"
-
-
-def _constant_time_eq(a: str, b: str) -> bool:
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
-
-
-def fingerprint(api_key: str | None) -> str:
-    """Short, non-reversible identifier for a credential - for audit correlation
-    only, never store the raw key."""
-    if not api_key:
+def fingerprint(value: str | None) -> str:
+    """Short, non-reversible identifier - for audit correlation only."""
+    if not value:
         return ""
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 # ── Tokens ─────────────────────────────────────────────────────────────────────
@@ -132,13 +114,16 @@ def access_token_minutes() -> int:
         return 60
 
 
-def create_access_token(*, username: str, role: str, patient_id: str | None = None) -> tuple[str, int]:
+def create_access_token(*, username: str, role: str, patient_id: str | None = None,
+                        must_change_password: bool = False) -> tuple[str, int]:
     now = int(time.time())
     ttl = access_token_minutes() * 60
     claims = {
         "iss": JWT_ISSUER, "sub": username, "role": role, "pid": patient_id,
         "iat": now, "exp": now + ttl, "jti": uuid.uuid4().hex,
     }
+    if must_change_password:
+        claims["pwc"] = True
     return jwt.encode(claims, _jwt_secret(), algorithm=JWT_ALGORITHM), ttl
 
 
@@ -155,7 +140,8 @@ def decode_access_token(token: str) -> Principal:
         raise jwt.InvalidTokenError("unknown role")
     if role == ROLE_PATIENT and not claims.get("pid"):
         raise jwt.InvalidTokenError("patient token without patient binding")
-    return Principal(subject=claims["sub"], role=role, patient_id=claims.get("pid"), via="jwt")
+    return Principal(subject=claims["sub"], role=role, patient_id=claims.get("pid"), via="jwt",
+                     must_change_password=bool(claims.get("pwc")))
 
 
 # ── Request dependencies ───────────────────────────────────────────────────────
@@ -167,9 +153,10 @@ def _client_ip(request: Request) -> str:
 async def get_principal(
     request: Request,
     authorization: str = Header(default=""),
-    x_api_key: str = Header(default=""),
 ) -> Principal:
-    """Resolve the caller. Bearer JWT wins; the shared key is the fallback."""
+    """Resolve the caller from the Bearer JWT. Does NOT refuse a must-change-password
+    token: /auth/me and /auth/change-password need it. Everything else goes through
+    require_roles, which does."""
     from src.security import audit  # local: audit imports the DB layer
 
     if authorization.lower().startswith("bearer "):
@@ -183,14 +170,6 @@ async def get_principal(
                                 headers={"WWW-Authenticate": "Bearer"})
         request.state.principal = principal
         return principal
-
-    if x_api_key and _api_key_auth_allowed():
-        expected = _configured_api_key()
-        if _constant_time_eq(x_api_key, expected):
-            principal = Principal(subject=f"service:{fingerprint(x_api_key)}", role=ROLE_SERVICE,
-                                  patient_id=None, via="api_key")
-            request.state.principal = principal
-            return principal
 
     audit.record(actor="anonymous", action="auth.missing_or_invalid_credentials",
                  outcome="denied", ip=_client_ip(request),
@@ -206,6 +185,9 @@ def require_roles(*roles: str) -> Callable:
     allowed = set(roles)
 
     async def _dep(request: Request, principal: Principal = Depends(get_principal)) -> Principal:
+        if principal.must_change_password:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "You must change your temporary password before using the system.")
         if principal.role not in allowed:
             from src.security import audit
             audit.record(actor=principal.subject, role=principal.role, action="authz.denied",
@@ -217,39 +199,17 @@ def require_roles(*roles: str) -> Callable:
     return _dep
 
 
-# ── Backwards-compatible helpers (original shared-key API) ────────────────────
-
-async def require_api_key(x_api_key: str = Header(default="")) -> str:
-    """Original dependency: raise 401 unless X-API-Key matches API_KEY. Kept for
-    scripts; endpoints use get_principal/require_roles now."""
-    expected = _configured_api_key()
-    if not x_api_key or not _constant_time_eq(x_api_key, expected):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or missing API key.")
-    return x_api_key
-
+# ── WebSocket ──────────────────────────────────────────────────────────────────
 
 async def verify_ws_auth(websocket: WebSocket) -> Principal | None:
-    """Authenticate a WebSocket via `token` (JWT) or `api_key` query param. Returns
-    None (caller closes the socket) rather than raising: a dependency-raised
-    HTTPException doesn't cleanly close an already-accepted socket."""
+    """Authenticate a WebSocket via the `token` (JWT) query param. Returns None (caller
+    closes the socket) rather than raising: a dependency-raised HTTPException doesn't
+    cleanly close an already-accepted socket. A must-change-password token is refused."""
     token = websocket.query_params.get("token", "")
-    if token:
-        try:
-            return decode_access_token(token)
-        except Exception:
-            return None
-    provided = websocket.query_params.get("api_key", "")
-    if provided and _api_key_auth_allowed():
-        try:
-            expected = _configured_api_key()
-        except HTTPException:
-            return None
-        if _constant_time_eq(provided, expected):
-            return Principal(subject=f"service:{fingerprint(provided)}", role=ROLE_SERVICE,
-                             patient_id=None, via="api_key")
-    return None
-
-
-async def verify_ws_api_key(websocket: WebSocket) -> bool:
-    """Original WebSocket check (shared key only). Kept for compatibility."""
-    return (await verify_ws_auth(websocket)) is not None
+    if not token:
+        return None
+    try:
+        principal = decode_access_token(token)
+    except Exception:
+        return None
+    return None if principal.must_change_password else principal
