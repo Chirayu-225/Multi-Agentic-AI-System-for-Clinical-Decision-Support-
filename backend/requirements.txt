@@ -22,7 +22,7 @@ sentence-transformers==3.0.1
 pymupdf==1.24.1
 easyocr==1.7.1
 langdetect==1.0.9
-indic-transliteration==2.3.57
+indic-transliteration==2.3.82
 
 # NER
 gliner==0.2.9
