@@ -14,5 +14,5 @@ numpy==1.26.4
 pymupdf==1.24.1
 reportlab==4.4.2
 pytest==8.2.2
-bandit==1.7.9
+bandit==1.9.4
 pip-audit==2.7.3
