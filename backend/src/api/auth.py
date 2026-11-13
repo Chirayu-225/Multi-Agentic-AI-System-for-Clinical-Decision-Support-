@@ -20,10 +20,14 @@ password. Their token has the `pwc` claim, `Principal.must_change_password` is T
 (/auth/me, /auth/change-password). Changing the password issues a fresh, unrestricted token.
 
 Why a JWT and not server sessions: the API is stateless and the Angular client is a
-separate origin. Tradeoff accepted and documented in SECURITY.md: tokens cannot be
-revoked before they expire (keep ACCESS_TOKEN_MINUTES short), and the SPA keeps the
-token in sessionStorage, so an XSS bug would expose it - which is why the frontend
-never renders model output with innerHTML (OWASP LLM10).
+separate origin. The SPA keeps the token in sessionStorage, so an XSS bug would expose it -
+which is why the frontend never renders model output with innerHTML (OWASP LLM10).
+
+Revocation: each user has a `token_version`, copied into every token (`tv` claim). On every
+request the token's version is compared with the account's current one, and the account must
+still be active. Changing or resetting a password, or deactivating the account, bumps the
+version, so every token issued earlier stops working immediately (one small DB read per
+request). Tokens issued before this existed carry no `tv` and count as version 0.
 
 WebSocket: browsers cannot set headers on a WebSocket, so the JWT travels as a `token`
 query parameter. Use wss:// outside local development.
@@ -60,6 +64,7 @@ class Principal:
     patient_id: str | None  # set for role == patient
     via: str = "jwt"
     must_change_password: bool = False   # temporary password: only /auth/change-password works
+    token_version: int = 0               # must equal the account's current token_version
 
     @property
     def is_staff(self) -> bool:
@@ -115,16 +120,40 @@ def access_token_minutes() -> int:
 
 
 def create_access_token(*, username: str, role: str, patient_id: str | None = None,
-                        must_change_password: bool = False) -> tuple[str, int]:
+                        must_change_password: bool = False, token_version: int = 0) -> tuple[str, int]:
     now = int(time.time())
     ttl = access_token_minutes() * 60
     claims = {
         "iss": JWT_ISSUER, "sub": username, "role": role, "pid": patient_id,
-        "iat": now, "exp": now + ttl, "jti": uuid.uuid4().hex,
+        "iat": now, "exp": now + ttl, "jti": uuid.uuid4().hex, "tv": int(token_version or 0),
     }
     if must_change_password:
         claims["pwc"] = True
     return jwt.encode(claims, _jwt_secret(), algorithm=JWT_ALGORITHM), ttl
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def session_is_current(principal: Principal) -> bool:
+    """False when the account is gone or disabled, or the token predates the account's current
+    token_version (password changed/reset, account deactivated). Fails closed on any DB error."""
+    from src.db.models import User          # local: keep this module importable without the DB layer
+    from src.db.session import SessionLocal
+    try:
+        with SessionLocal() as db:
+            row = (db.query(User.is_active, User.token_version)
+                   .filter(User.username == principal.subject).first())
+    except Exception:
+        logger.exception("token revocation check failed - rejecting the token")
+        return False
+    if row is None or not row[0]:
+        return False
+    return _as_int(row[1]) == principal.token_version
 
 
 def decode_access_token(token: str) -> Principal:
@@ -141,7 +170,8 @@ def decode_access_token(token: str) -> Principal:
     if role == ROLE_PATIENT and not claims.get("pid"):
         raise jwt.InvalidTokenError("patient token without patient binding")
     return Principal(subject=claims["sub"], role=role, patient_id=claims.get("pid"), via="jwt",
-                     must_change_password=bool(claims.get("pwc")))
+                     must_change_password=bool(claims.get("pwc")),
+                     token_version=_as_int(claims.get("tv")))
 
 
 # ── Request dependencies ───────────────────────────────────────────────────────
@@ -167,6 +197,12 @@ async def get_principal(
             audit.record(actor="anonymous", action="auth.token_rejected", outcome="denied",
                          ip=_client_ip(request))
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.",
+                                headers={"WWW-Authenticate": "Bearer"})
+        if not session_is_current(principal):
+            audit.record(actor=principal.subject, role=principal.role, action="auth.token_revoked",
+                         outcome="denied", ip=_client_ip(request))
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                                "Your session is no longer valid. Please sign in again.",
                                 headers={"WWW-Authenticate": "Bearer"})
         request.state.principal = principal
         return principal
@@ -212,4 +248,6 @@ async def verify_ws_auth(websocket: WebSocket) -> Principal | None:
         principal = decode_access_token(token)
     except Exception:
         return None
-    return None if principal.must_change_password else principal
+    if principal.must_change_password or not session_is_current(principal):
+        return None
+    return principal

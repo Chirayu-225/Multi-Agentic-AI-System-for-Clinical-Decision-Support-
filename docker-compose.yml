@@ -29,6 +29,9 @@ services:
       - "8000"
     volumes:
       - ./backend/data:/app/data
+      # Uploaded files wait here until their job finishes. It must outlive the container (a queued
+      # job is still processed after a restart) and be shared by every backend replica.
+      - upload_spool:/app/spool
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY must be set in .env}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
@@ -46,6 +49,14 @@ services:
       - ENABLE_PUBMED=${ENABLE_PUBMED:-false}
       - AUDIT_ENABLED=${AUDIT_ENABLED:-true}
       - OCR_GPU=${OCR_GPU:-false}
+      # Durable upload queue (see backend/src/jobs/queue.py). Defaults are fine for one machine.
+      - UPLOAD_SPOOL_DIR=/app/spool
+      - JOB_WORKERS=${JOB_WORKERS:-2}
+      - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
+      - JOB_LEASE_SECONDS=${JOB_LEASE_SECONDS:-60}
+      - JOB_QUEUE_MAX=${JOB_QUEUE_MAX:-200}
+      # /metrics is off (404) unless this is set; then it needs "Authorization: Bearer <token>".
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
       # First-run accounts (created only if the username does not exist).
       - BOOTSTRAP_CLINICIAN_USERNAME=${BOOTSTRAP_CLINICIAN_USERNAME:-}
       - BOOTSTRAP_CLINICIAN_PASSWORD=${BOOTSTRAP_CLINICIAN_PASSWORD:-}
@@ -71,3 +82,4 @@ services:
 
 volumes:
   postgres_data:
+  upload_spool:

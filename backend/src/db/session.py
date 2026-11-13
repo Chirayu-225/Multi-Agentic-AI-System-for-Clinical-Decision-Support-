@@ -24,6 +24,18 @@ connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite")
 # see an empty database. StaticPool shares one connection (used by the test-suite).
 _engine_kwargs = {"poolclass": StaticPool} if DATABASE_URL in ("sqlite://", "sqlite:///:memory:") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args, **_engine_kwargs)
+
+if DATABASE_URL.startswith("sqlite") and DATABASE_URL not in ("sqlite://", "sqlite:///:memory:"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):
+        # WAL lets readers and one writer proceed together (the job worker, the API and the audit
+        # log all write), and the busy timeout makes a writer wait for the lock instead of failing.
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=10000")
+        cur.close()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -50,6 +62,7 @@ def create_tables():
     """
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    _ensure_indexes()
 
 
 def _add_missing_columns():
@@ -86,6 +99,28 @@ def _add_missing_columns():
                 conn.execute(text(
                     f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}'
                 ))
+
+
+# Indexes that create_all() builds for a new database but never adds to an existing one.
+# CREATE INDEX IF NOT EXISTS is idempotent and portable (SQLite and PostgreSQL), so this runs
+# on every start. Keep the names identical to the Index(...) declarations in db/models.py.
+_INDEXES = (
+    ("ix_reports_patient_created", 'CREATE INDEX IF NOT EXISTS ix_reports_patient_created ON reports (patient_id, created_at)'),
+    ("ix_reports_review_status", 'CREATE INDEX IF NOT EXISTS ix_reports_review_status ON reports (review_status)'),
+    ("ix_upload_jobs_claim", 'CREATE INDEX IF NOT EXISTS ix_upload_jobs_claim ON upload_jobs (status, next_attempt_at)'),
+    # UNIQUE: keeps the audit hash chain linear. Creating it fails if an old chain already has
+    # a fork; that is logged loudly rather than crashing startup.
+    ("ux_audit_prev_hash", 'CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_prev_hash ON audit_events (prev_hash)'),
+)
+
+
+def _ensure_indexes():
+    for name, ddl in _INDEXES:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception:  # noqa: BLE001 - one bad index must not stop the app starting
+            logger.exception("Could not create index %s", name)
 
 
 def get_db():

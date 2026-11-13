@@ -3,7 +3,7 @@ src/db/models.py
 PostgreSQL models via SQLAlchemy.
 """
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, JSON, Integer, Text, ForeignKey, Boolean
+from sqlalchemy import Column, String, DateTime, JSON, Integer, Text, ForeignKey, Boolean, Index
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -81,6 +81,14 @@ class Report(Base):
 
     patient = relationship("Patient", back_populates="reports")
 
+    # Hot paths: a patient's history (filter by patient, order by time) and the clinician's
+    # review queue (filter by status). Existing databases get the same indexes from
+    # db/session.py:_ensure_indexes() because create_all() never alters an existing table.
+    __table_args__ = (
+        Index("ix_reports_patient_created", "patient_id", "created_at"),
+        Index("ix_reports_review_status", "review_status"),
+    )
+
 
 class AgentRun(Base):
     """Audit trail — every agent invocation logged here."""
@@ -118,6 +126,9 @@ class User(Base):
     # True after a clinician creates or resets the account: the password is temporary and the
     # only thing the token allows is changing it. NULL (older rows) means False.
     must_change_password = Column(Boolean, default=False)
+    # Bumped on password change/reset and on deactivation. Every token carries the value it was
+    # issued with and is rejected once it no longer matches (see api/auth.py). NULL means 0.
+    token_version = Column(Integer, default=0)
     failed_logins = Column(Integer, default=0)
     locked_until  = Column(DateTime)
     created_at    = Column(DateTime, default=datetime.utcnow)
@@ -142,3 +153,51 @@ class AuditEvent(Base):
     detail    = Column(JSON)
     prev_hash = Column(String, nullable=False)
     hash      = Column(String, nullable=False)
+
+    # UNIQUE prev_hash is what makes the chain impossible to fork: two writers that read the same
+    # head both try to append after it, and the database rejects the second one (which then
+    # re-reads the head and retries, see security/audit.py). Works on SQLite and Postgres alike.
+    __table_args__ = (Index("ux_audit_prev_hash", "prev_hash", unique=True),)
+
+
+class UploadJob(Base):
+    """Durable queue entry for one report upload (see src/jobs/queue.py for the protocol).
+
+    The row is the single source of truth for a job: it survives a restart, it is what the
+    polling endpoint reads, and the claim/lease columns are what let several workers (or a
+    restarted process) share the queue without two of them running the same job.
+    The id IS the report id, so a second upload with the same id is rejected by the primary key.
+    Holds identifiers, stage names and counters only - the report content lives on disk in the
+    spool until the job finishes, and in `reports` once it has been analysed.
+    """
+    __tablename__ = "upload_jobs"
+
+    id           = Column(String, primary_key=True)             # == report id
+    owner        = Column(String, nullable=False, index=True)   # uploader's username
+    ip           = Column(String)
+    patient_id   = Column(String, nullable=False)
+    filename     = Column(String)
+    ext          = Column(String)
+    report_date  = Column(String)
+    language     = Column(String, default="en")
+    spool_path   = Column(String, nullable=False)               # the uploaded file, until the job ends
+
+    status       = Column(String, nullable=False, default="queued")   # queued|running|complete|failed
+    stage        = Column(String, default="queued")
+    percent      = Column(Integer, default=0)
+    error        = Column(Text)                                  # user-safe message, never a traceback
+
+    attempts     = Column(Integer, nullable=False, default=0)    # incremented when a worker claims it
+    max_attempts = Column(Integer, nullable=False, default=3)
+    next_attempt_at  = Column(DateTime, nullable=False)          # not claimable before this (backoff)
+    locked_by        = Column(String)                            # worker id holding the lease
+    lease_expires_at = Column(DateTime)                          # a running job past this is presumed dead
+
+    created_at   = Column(DateTime, nullable=False)
+    started_at   = Column(DateTime)
+    finished_at  = Column(DateTime)
+
+    __table_args__ = (
+        # The claim query filters on status and orders by age; this keeps it an index scan.
+        Index("ix_upload_jobs_claim", "status", "next_attempt_at"),
+    )

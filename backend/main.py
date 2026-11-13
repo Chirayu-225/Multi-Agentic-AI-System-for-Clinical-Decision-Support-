@@ -5,6 +5,7 @@ Agentic Medical Assistant — FastAPI backend.
 Endpoints
   Auth        POST /auth/login · GET /auth/me · POST /auth/change-password
   Accounts    GET/POST /admin/users · POST /admin/users/{username}/reset-password
+              POST /admin/users/{username}/deactivate · .../reactivate
   Pipeline    POST /report/upload · WS /ws/{report_id}
   Review      POST /report/{id}/review · GET /reviews/pending
   Reports     GET /report/{id} · POST /report/{id}/translate · GET /report/{id}/fhir
@@ -39,7 +40,10 @@ if os.getenv("MEDSIGHT_SKIP_DOTENV") != "1":
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Query, Request,
                      UploadFile, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.session import get_db, create_tables, SessionLocal
@@ -58,6 +62,9 @@ from src.tools.trend_series import build_trend_series
 from src.api import auth as authmod
 from src.api.auth import (Principal, ROLE_CLINICIAN, ROLE_PATIENT,
                           get_principal, require_roles, verify_ws_auth, fingerprint)
+from src import observability as obs
+from src.jobs import queue as jobq
+from src.jobs.worker import JobWorker
 from src.security import audit
 from src.security.passwords import (DUMMY_HASH, WeakPassword, hash_password,
                                     validate_password_strength, verify_password)
@@ -67,7 +74,7 @@ from src.security.deidentification import rehydrate, redact, build_redaction_map
 from src.evidence.grounding import build_evidence, collect_allowed_numbers, find_ungrounded_numbers
 from src.interop.fhir import build_bundle
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+obs.configure_logging()   # one log format everywhere, carrying the request id and job id
 logger = logging.getLogger("medsight")
 
 # Every AI-generated summary carries this disclaimer end-to-end (API + UI) —
@@ -117,6 +124,25 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Give every request a correlation id (logged on every line, returned as X-Request-ID) and
+    count it. The metric's route label is the route TEMPLATE (/report/{report_id}), never the
+    concrete path, so it cannot grow with the number of reports or leak an id."""
+    rid = obs.accept_request_id(request.headers.get("x-request-id"), lambda: uuid.uuid4().hex[:16])
+    token = obs.request_id_var.set(rid)
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    finally:
+        obs.request_id_var.reset(token)
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    obs.inc("http_requests_total", method=request.method, route=route, status=str(response.status_code))
+    obs.observe("http_request_seconds", time.monotonic() - started, route=route)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
 # Active WebSocket connections per report_id
 _ws_connections: dict[str, WebSocket] = {}
 
@@ -147,6 +173,14 @@ async def startup():
     authmod.validate_auth_config()
     create_tables()
     _bootstrap_users()
+    await _start_job_worker()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    # Running jobs are handed back to the queue (not lost, not counted as an attempt).
+    if _worker is not None:
+        await _worker.stop()
 
 
 def _bootstrap_users():
@@ -186,8 +220,43 @@ def _bootstrap_users():
 
 @app.get("/health")
 def health():
-    # Deliberately minimal and unauthenticated (load balancers hit this).
+    # LIVENESS: the process is up and answering. Deliberately minimal and unauthenticated, and it
+    # touches nothing else, so a slow database cannot make an orchestrator kill a healthy process.
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/ready")
+def ready(db: Session = Depends(get_db)):
+    """READINESS: can this instance do useful work right now? Database reachable, job worker
+    running (unless JOB_WORKERS=0 turned it off on purpose). Returns 503 otherwise so a load
+    balancer stops sending uploads here. Reports counts only, never anything about a report.
+    Not proxied by nginx: for the orchestrator, not for the internet."""
+    checks: dict[str, str] = {}
+    queue: dict[str, int] | None = None
+    try:
+        db.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+        queue = jobq.depth_by_status(db)
+    except Exception:  # noqa: BLE001
+        checks["database"] = "down"
+    if _env_num("JOB_WORKERS", 2, int) <= 0:
+        checks["worker"] = "disabled"
+    else:
+        checks["worker"] = "ok" if (_worker is not None and _worker.alive) else "down"
+    ok = all(v in ("ok", "disabled") for v in checks.values())
+    return JSONResponse({"status": "ready" if ok else "not_ready", **checks, "queue": queue},
+                        status_code=200 if ok else 503)
+
+
+@app.get("/metrics")
+def metrics(request: Request):
+    """Prometheus metrics. Off (404) unless METRICS_TOKEN is set, then Bearer-protected. Contains
+    counts, latencies and queue depth only. Not proxied by nginx."""
+    token = os.getenv("METRICS_TOKEN", "")
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not token or not secrets.compare_digest(supplied.encode(), token.encode()):
+        raise HTTPException(404, "Not found")
+    return PlainTextResponse(obs.render(), media_type="text/plain; version=0.0.4")
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -245,7 +314,8 @@ def _session_payload(user: User) -> dict:
     must_change = bool(user.must_change_password)
     token, ttl = authmod.create_access_token(username=user.username, role=user.role,
                                              patient_id=user.patient_id,
-                                             must_change_password=must_change)
+                                             must_change_password=must_change,
+                                             token_version=user.token_version or 0)
     return {"access_token": token, "token_type": "bearer", "expires_in": ttl,
             "role": user.role, "username": user.username,
             "display_name": user.display_name or user.username, "patient_id": user.patient_id,
@@ -297,6 +367,9 @@ def change_password(body: ChangePasswordIn, request: Request, db: Session = Depe
     user.must_change_password = False
     user.failed_logins = 0
     user.locked_until = None
+    # Every token issued so far (including the one making this call) stops working; the fresh
+    # token returned below carries the new version, so this device stays signed in.
+    user.token_version = (user.token_version or 0) + 1
     db.commit()
     audit.record(actor=user.username, role=user.role, action="auth.password_changed", ip=ip)
     return _session_payload(user)
@@ -362,14 +435,49 @@ def create_patient_account(body: CreatePatientAccountIn, request: Request, db: S
             "note": "Shown once. Give it to the patient securely; they must change it at first sign-in."}
 
 
+def _patient_account_or_404(db: Session, username: str) -> User:
+    user = db.query(User).filter(User.username == username.strip().lower()).first()
+    if not user or user.role != ROLE_PATIENT:
+        raise HTTPException(404, "No patient account with that username.")
+    return user
+
+
+@app.post("/admin/users/{username}/deactivate")
+def deactivate_patient_account(username: str, request: Request, db: Session = Depends(get_db),
+                               principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """Disable a patient login and end any session it has open. Their reports are untouched."""
+    user = _patient_account_or_404(db, username)
+    audit.record(actor=principal.subject, role=principal.role, action="user.deactivate",
+                 resource=f"user:{user.username}", ip=_ip(request), critical=True,
+                 detail={"patient_id": user.patient_id})
+    user.is_active = False
+    user.token_version = (user.token_version or 0) + 1
+    db.commit()
+    return _account_view(user)
+
+
+@app.post("/admin/users/{username}/reactivate")
+def reactivate_patient_account(username: str, request: Request, db: Session = Depends(get_db),
+                               principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """Re-enable a disabled patient login. The password is unchanged; sessions from before the
+    deactivation stay dead (the token version was already bumped)."""
+    user = _patient_account_or_404(db, username)
+    audit.record(actor=principal.subject, role=principal.role, action="user.reactivate",
+                 resource=f"user:{user.username}", ip=_ip(request), critical=True,
+                 detail={"patient_id": user.patient_id})
+    user.is_active = True
+    user.failed_logins = 0
+    user.locked_until = None
+    db.commit()
+    return _account_view(user)
+
+
 @app.post("/admin/users/{username}/reset-password")
 def reset_patient_password(username: str, request: Request, db: Session = Depends(get_db),
                            principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
     """Forgotten password: issue a new temporary one, unlock the account, force a change.
     Patient accounts only (there is no admin role yet, so one clinician cannot reset another)."""
-    user = db.query(User).filter(User.username == username.strip().lower()).first()
-    if not user or user.role != ROLE_PATIENT:
-        raise HTTPException(404, "No patient account with that username.")
+    user = _patient_account_or_404(db, username)
     temp = _temporary_password()
     audit.record(actor=principal.subject, role=principal.role, action="user.password_reset",
                  resource=f"user:{user.username}", ip=_ip(request), critical=True,
@@ -378,6 +486,7 @@ def reset_patient_password(username: str, request: Request, db: Session = Depend
     user.must_change_password = True
     user.failed_logins = 0
     user.locked_until = None
+    user.token_version = (user.token_version or 0) + 1      # signs out any session already open
     db.commit()
     return {**_account_view(user), "temporary_password": temp,
             "note": "Shown once. Give it to the patient securely; they must change it at first sign-in."}
@@ -422,6 +531,126 @@ def _make_ws_callback(report_id: str):
     def callback(step: dict):
         asyncio.create_task(_send(step))
     return callback
+
+
+# ── Upload jobs ────────────────────────────────────────────────────────────────
+# An upload is accepted fast (validated, written to the spool, queued as a row in `upload_jobs`)
+# and analysed later by a JobWorker. The job id IS the report id (the client already opens
+# /ws/{report_id} before uploading). The queue lives in the database, so a restart does not lose
+# work: see src/jobs/queue.py for the delivery guarantee (at-least-once) and why the pipeline's
+# final write is idempotent. Nothing in a job row holds PHI: ids, stage, percent, counters.
+
+_worker: JobWorker | None = None
+
+
+def _env_num(name: str, default, cast=float):
+    try:
+        return cast(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _spool_dir() -> str:
+    """Where uploaded files wait until their job finishes. Must survive a restart (so a queued
+    job can still run afterwards) and be readable by every worker. Mode 0700: it holds PHI."""
+    path = os.getenv("UPLOAD_SPOOL_DIR") or os.path.join(tempfile.gettempdir(), "medsight-spool")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+# Stage -> percent. Tool calls inside the orchestrator advance 10 -> 50 in small steps.
+_STAGE_PERCENT = {
+    "queued": 0, "pipeline_start": 10, "orchestrator_complete": 50, "generating_summaries": 60,
+    "verifier_start": 75, "verifier_complete": 85, "translating": 90, "saving": 95, "pipeline_complete": 100,
+}
+
+
+def _make_job_callback(job_id: str, report_progress):
+    """Forward agent steps to the websocket, add `progress` events, and persist progress on the job
+    row (via `report_progress`) so the polling endpoint works even if the websocket never connects."""
+    ws = _make_ws_callback(job_id)
+    state = {"percent": 0}
+
+    def callback(step: dict):
+        ws(step)
+        stage = step.get("type")
+        pct = _STAGE_PERCENT.get(stage)
+        if stage in ("tool_call", "tool_result"):
+            pct = min(state["percent"] + 2, 49)
+        if pct is None or pct < state["percent"]:
+            return
+        state["percent"] = pct
+        report_progress(stage, pct)
+        ws({"type": "progress", "report_id": job_id, "stage": stage, "percent": pct})
+    return callback
+
+
+def _job_failure(job: jobq.JobSnapshot, exc: BaseException, final: bool) -> str:
+    """Called by the worker for every failed attempt. The full detail (with traceback) goes to the
+    server log under an incident id; the client only ever gets the generic message + that id, so
+    internal paths and data are never reflected back."""
+    incident_id = uuid.uuid4().hex[:8]
+    logger.error("Upload failed [incident=%s] attempt=%d/%d final=%s report_id=%s",
+                 incident_id, job.attempts, job.max_attempts, final, job.id, exc_info=exc)
+    audit.record(actor=job.owner, role=ROLE_CLINICIAN, action="report.upload" if final else "report.upload_retry",
+                 resource=f"report:{job.id}", outcome="failure", ip=job.ip,
+                 detail={"incident": incident_id, "attempt": job.attempts, "final": final})
+    return f"Processing failed. Reference: {incident_id}. Check server logs for detail."
+
+
+def _job_finished(job: jobq.JobSnapshot, status: str, error: str | None) -> None:
+    """Terminal state reached: tell the browser and delete the uploaded file (PHI) from the spool."""
+    ws = _make_ws_callback(job.id)
+    if status == jobq.COMPLETE:
+        ws({"type": "pipeline_complete", "report_id": job.id})
+        ws({"type": "progress", "report_id": job.id, "stage": "pipeline_complete", "percent": 100})
+    else:
+        ws({"type": "pipeline_error", "report_id": job.id, "detail": error})
+    try:
+        os.unlink(job.spool_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("could not delete spool file for job %s", job.id)
+
+
+async def _start_job_worker() -> None:
+    global _worker
+    workers = _env_num("JOB_WORKERS", 2, int)
+    if workers <= 0:
+        logger.info("JOB_WORKERS=0: this process only accepts uploads; another process must run the jobs")
+        _worker = None
+    else:
+        _worker = JobWorker(
+            session_factory=SessionLocal, process=_process_upload,
+            on_failure=_job_failure, on_finished=_job_finished,
+            concurrency=workers,
+            lease_seconds=_env_num("JOB_LEASE_SECONDS", 60.0),
+            poll_seconds=_env_num("JOB_POLL_SECONDS", 1.0),
+            retry_base_seconds=_env_num("JOB_RETRY_BASE_SECONDS", 15.0),
+            retention=timedelta(hours=_env_num("JOB_RETENTION_HOURS", 24.0)),
+        )
+        await _worker.start()
+
+    def _depth() -> dict:
+        db = SessionLocal()
+        try:
+            return jobq.depth_by_status(db)
+        finally:
+            db.close()
+
+    obs.gauge("upload_jobs", "Upload jobs by status (database-wide).", _depth)
+
+
+@app.get("/report/{report_id}/job")
+def get_upload_job(report_id: str, db: Session = Depends(get_db),
+                   principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """Job status; also the poll fallback for the websocket (late connect, dropped socket,
+    or a job being processed by another process). Uploader only."""
+    row = jobq.get(db, report_id)
+    if not row or row.owner != principal.subject:
+        raise HTTPException(404, "No such upload job.")
+    return jobq.job_view(row)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -565,10 +794,7 @@ async def upload_report(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_roles(ROLE_CLINICIAN)),
 ):
-    started = time.monotonic()
-    models_used = begin_model_tracking()   # every model that answers during this upload
     ip = _ip(request)
-    caller_fp = fingerprint(principal.subject)
     ok, retry_after = rate_limit_allow(
         principal.subject, UPLOAD_RATE_LIMIT_MAX, UPLOAD_RATE_LIMIT_WINDOW_SECONDS
     )
@@ -598,13 +824,13 @@ async def upload_report(
     report_id = report_id or str(uuid.uuid4())
     if not re.match(r"^[A-Za-z0-9\-]{1,64}$", report_id):
         raise HTTPException(400, "Invalid report_id.")
-    if db.query(Report).filter(Report.id == report_id).first():
+    if jobq.get(db, report_id) or db.query(Report).filter(Report.id == report_id).first():
         raise HTTPException(409, "A report with this id already exists.")
 
     # Save to temp file, enforcing a size cap (previously unbounded — a large
     # upload could tie up OCR/NER/LLM processing indefinitely). The original
     # extension is kept so the loader can tell a PDF from a photo.
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False, dir=_spool_dir()) as tmp:
         tmp_path = tmp.name
         total = 0
         while chunk := await file.read(1024 * 1024):
@@ -621,9 +847,68 @@ async def upload_report(
             audit.record(actor=principal.subject, role=principal.role, action="upload.rejected_content_mismatch",
                          resource=f"patient:{patient_id}", outcome="denied", ip=ip, detail={"ext": ext})
             raise HTTPException(400, "File content does not match its extension.")
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+    # Everything slow (OCR, NER, Gemini, DB write) happens in a background job. The file stays in
+    # the spool until that job reaches a terminal state, then the worker deletes it.
+    if jobq.active_count(db) >= _env_num("JOB_QUEUE_MAX", 200, int):
+        os.unlink(tmp_path)
+        raise HTTPException(503, "Too many uploads in progress. Retry shortly.",
+                            headers={"Retry-After": "30"})
+    try:
+        row = jobq.enqueue(
+            db, job_id=report_id, owner=principal.subject, ip=ip, patient_id=patient_id, filename=filename,
+            ext=ext, report_date=report_date, language=language, spool_path=tmp_path,
+            max_attempts=_env_num("JOB_MAX_ATTEMPTS", 3, int))
+    except jobq.DuplicateJob:
+        os.unlink(tmp_path)
+        raise HTTPException(409, "A report with this id already exists.")
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
+    audit.record(actor=principal.subject, role=principal.role, action="report.upload_queued",
+                 resource=f"report:{report_id}", ip=ip, detail={"patient_id": patient_id})
+    obs.inc("uploads_accepted_total")
+    if _worker is not None:
+        _worker.wake()
+    return JSONResponse(
+        status_code=202,
+        content={**jobq.job_view(row), "status_url": f"/report/{report_id}/job"},
+        headers={"Location": f"/report/{report_id}/job"},
+    )
+
+
+async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
+    """The analysis pipeline for one queued upload, run by a JobWorker with its own DB session.
+
+    Failure handling lives in the worker: this raises, the worker retries with backoff and finally
+    fails the job. Delivery is at-least-once, so this must be safe to run twice for the same
+    upload: it returns early if an earlier attempt already saved the report, and the final write
+    treats a primary-key clash (a second worker got there first) as success."""
+    report_id, patient_id, ext = job.id, job.patient_id, job.ext or ""
+    filename, report_date, language = job.filename, job.report_date or "", job.language
+    tmp_path, ip = job.spool_path, job.ip or "unknown"
+    principal = Principal(subject=job.owner, role=ROLE_CLINICIAN, patient_id=None)
+    started = time.monotonic()
+    models_used = begin_model_tracking()   # every model that answers during this upload
+    caller_fp = fingerprint(principal.subject)
+    ws_callback = _make_job_callback(report_id, report_progress)
+    db = SessionLocal()
+    try:
+        if db.query(Report.id).filter(Report.id == report_id).first():
+            logger.info("report already saved by an earlier attempt; nothing to redo")
+            return
 
         # ── Step 1: Ingest ─────────────────────────────────────────────────
-        doc = await asyncio.to_thread(load_document, tmp_path)
+        try:
+            doc = await asyncio.to_thread(load_document, tmp_path)
+        except Exception as exc:
+            # An unreadable file will be just as unreadable on the next attempt: fail now.
+            raise jobq.PermanentJobError("document could not be read") from exc
+        raw_text = doc["raw_text"]
         raw_text = doc["raw_text"]
         clean_date = str(report_date).split(" ")[0].split("T")[0] if report_date else ""
 
@@ -639,7 +924,6 @@ async def upload_report(
             security_extra += await asyncio.to_thread(detect_hidden_pdf_text, tmp_path)
 
         # ── Step 2: Orchestrator agent (tool calling + ReAct) ──────────────
-        ws_callback = _make_ws_callback(report_id)
         ws_callback({"type": "pipeline_start", "report_id": report_id})
 
         agent_data = await run_orchestrator(
@@ -787,7 +1071,8 @@ async def upload_report(
         )
 
         # ── Step 5: Persist ────────────────────────────────────────────────
-        patient = db.query(Patient).filter(Patient.id == patient_id).first()
+        ws_callback({"type": "saving"})
+        patient =db.query(Patient).filter(Patient.id == patient_id).first()
         if not patient:
             patient = Patient(id=patient_id)
             db.add(patient)
@@ -834,7 +1119,15 @@ async def upload_report(
             # e.g. "gemini-3.8-flash" or, if the fallback answered any call, both models
             model=",".join(sorted(models_used)) or (agent_data.get("token_usage") or {}).get("model"),
         ))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another worker saved this report first (lease handed over mid-run). That is a success.
+            db.rollback()
+            if db.query(Report.id).filter(Report.id == report_id).first():
+                logger.warning("report saved concurrently by another worker; finishing")
+                return
+            raise
 
         # ── Step 6: Store in ChromaDB for longitudinal tracking ─────────────
         # Redacted copy only: names, phone numbers, MRNs etc. never reach the vector store.
@@ -860,30 +1153,9 @@ async def upload_report(
                      detail={"patient_id": patient_id, "source_type": doc["source_type"],
                              "pages": doc["pages"], "llm_calls": llm_calls,
                              "review_status": report.review_status})
-        ws_callback({"type": "pipeline_complete", "report_id": report_id})
-
-        db.refresh(report)
-        return _report_full(report, db)
-
-    except HTTPException:
-        raise
-    except Exception:
-        incident_id = str(uuid.uuid4())[:8]
-        # Full detail (including traceback) is logged server-side only —
-        # the client gets a generic message plus a correlation id, not the
-        # raw exception string, which previously could reflect internal
-        # paths/data back to the caller.
-        logger.exception("Upload failed [incident=%s] report_id=%s", incident_id, report_id)
-        audit.record(actor=principal.subject, role=principal.role, action="report.upload",
-                     resource=f"report:{report_id}", outcome="failure", ip=ip,
-                     detail={"incident": incident_id})
-        raise HTTPException(
-            500,
-            detail=f"Processing failed. Reference: {incident_id}. Check server logs for detail.",
-        )
+        obs.inc("reports_analysed_total")
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        db.close()
 
 
 # ── Review (human-in-the-loop release) ─────────────────────────────────────────

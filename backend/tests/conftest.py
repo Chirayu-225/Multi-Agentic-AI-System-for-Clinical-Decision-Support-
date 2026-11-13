@@ -24,9 +24,20 @@ os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-production-0123456789")
 # Hard-set, never setdefault: the API tests DROP ALL TABLES between tests. A DATABASE_URL
 # inherited from the shell or .env once pointed them at the real medsight.db and wiped it.
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+# A throw-away FILE database in a fresh temp directory (not :memory:). The job queue is used from
+# several threads at once, and an in-memory SQLite database is one shared connection that cannot
+# be: a file gives every thread its own connection, as PostgreSQL does in production.
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="medsight-test-")
+os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(_TEST_DB_DIR, "test.db").replace("\\", "/")
+os.environ["UPLOAD_SPOOL_DIR"] = os.path.join(_TEST_DB_DIR, "spool")
 os.environ.setdefault("AUDIT_ENABLED", "true")
 os.environ.setdefault("UPLOAD_RATE_LIMIT_MAX", "1000")
+# Job queue: retry immediately and poll quickly so tests do not wait on backoff timers.
+os.environ.setdefault("JOB_RETRY_BASE_SECONDS", "0")
+os.environ.setdefault("JOB_POLL_SECONDS", "0.02")
 os.environ.setdefault("BOOTSTRAP_CLINICIAN_USERNAME", "dr.rao")
 os.environ.setdefault("BOOTSTRAP_CLINICIAN_PASSWORD", "Str0ng-Clinician-Pw!")
 os.environ.setdefault("BOOTSTRAP_PATIENT_USERNAME", "priya")
@@ -40,8 +51,15 @@ install_stubs()
 
 
 def pytest_sessionstart(session):
-    """Refuse to run if the app's engine is not the in-memory test database."""
+    """Refuse to run unless the app's engine is the throw-away database created above."""
     from src.db.session import engine
-    if str(engine.url) not in ("sqlite://", "sqlite:///:memory:"):
-        raise RuntimeError(f"Tests must use an in-memory database, got {engine.url!s} — aborting "
+    db_path = os.path.abspath(engine.url.database or "")
+    if not db_path.startswith(os.path.abspath(_TEST_DB_DIR) + os.sep):
+        raise RuntimeError(f"Tests must use the temporary test database, got {engine.url!s} - aborting "
                            "before any table is dropped.")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    from src.db.session import engine
+    engine.dispose()
+    shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)

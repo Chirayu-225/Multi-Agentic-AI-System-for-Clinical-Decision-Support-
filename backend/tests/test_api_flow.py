@@ -128,10 +128,42 @@ def login(client, creds):
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
-def upload(client, headers, patient_id="P001", pdf=None, name="r.pdf", report_date="2026-10-01", **extra):
+def upload_raw(client, headers, patient_id="P001", pdf=None, name="r.pdf", report_date="2026-10-01", **extra):
+    """POST /report/upload exactly as the API answers it (202 + job on success)."""
     return client.post("/report/upload", headers=headers,
                        files={"file": (name, pdf or _pdf_bytes(), "application/pdf")},
                        data={"patient_id": patient_id, "report_date": report_date, **extra})
+
+
+class _Done:
+    """Response-like result of a finished background job, so tests can keep asserting on it."""
+    def __init__(self, status_code, body):
+        self.status_code, self._body, self.text = status_code, body, str(body)
+
+    def json(self):
+        return self._body
+
+
+def wait_for_job(client, headers, report_id, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = client.get(f"/report/{report_id}/job", headers=headers).json()
+        if job["status"] in ("complete", "failed"):
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"upload job {report_id} did not finish: {job}")
+
+
+def upload(client, headers, **kw):
+    """Upload and wait for the background job. Returns the final report (200), the pipeline
+    failure (500), or the immediate rejection (400/401/413/429/...) as a response-like object."""
+    r = upload_raw(client, headers, **kw)
+    if r.status_code != 202:
+        return r
+    job = wait_for_job(client, headers, r.json()["report_id"])
+    if job["status"] == "failed":
+        return _Done(500, {"detail": job["error"]})
+    return client.get(f"/report/{job['report_id']}", headers=headers)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -372,7 +404,9 @@ def test_audit_records_key_events_and_chain_verifies(client):
 def test_audit_never_contains_phi(client):
     ch = login(client, CLIN)
     upload(client, ch)
-    blob = str(client.get("/admin/audit?limit=100", headers=ch).json())
+    events = client.get("/admin/audit?limit=100", headers=ch).json()["events"]
+    # Timestamps are excluded: "...:09.2xxxxx" contains the lab value "9.2" by chance now and then.
+    blob = str([{k: v for k, v in e.items() if k != "ts"} for e in events])
     for secret in ("Priya", "Sharma", "9876543210", "Hemoglobin", "9.2"):
         assert secret not in blob
 
@@ -408,7 +442,8 @@ def test_tail_truncation_is_the_documented_blind_spot_caught_only_by_external_an
     """Deleting the NEWEST rows leaves a valid chain - the DB alone cannot know. That is why
     verify_chain returns head_hash: record it somewhere the DBA cannot write, and compare."""
     ch = login(client, CLIN)
-    upload(client, ch)
+    # wait on the job itself (not upload()), so no report.view event lands after report.upload
+    wait_for_job(client, ch, upload_raw(client, ch).json()["report_id"])
     anchored = client.get("/admin/audit/verify", headers=ch).json()["head_hash"]
     _tamper(lambda db: db.query(AuditEvent).filter(AuditEvent.action == "audit.verify").delete())
     _tamper(lambda db: db.query(AuditEvent).filter(AuditEvent.action == "report.upload").delete())

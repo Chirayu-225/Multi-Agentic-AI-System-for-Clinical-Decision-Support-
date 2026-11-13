@@ -433,8 +433,22 @@ export interface PatientAccountWithSecret extends PatientAccount {
   note: string;
 }
 
+/** 202 body from POST /report/upload, and the shape of GET /report/{id}/job. */
+export interface UploadJob {
+  job_id: string;
+  report_id: string;
+  status: 'queued' | 'running' | 'complete' | 'failed';
+  stage: string;
+  percent: number;
+  error: string | null;
+  status_url?: string;
+}
+
 export interface AgentStep {
   type: string;
+  percent?: number;
+  stage?: string;
+  detail?: string;
   tool?: string;
   args?: any;
   result?: string;

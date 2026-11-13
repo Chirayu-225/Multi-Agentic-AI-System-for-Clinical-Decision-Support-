@@ -93,15 +93,21 @@ import { PatientAccount, PatientAccountWithSecret } from '../../models/report.mo
                   <span class="text-gray-600 font-mono text-xs">({{ a.username }})</span></p>
                 <p class="text-xs text-gray-500">
                   Patient {{ a.patient_id }} ·
-                  @if (a.must_change_password) { waiting for first sign-in }
+                  @if (!a.is_active) { <span class="text-amber-400">disabled</span> }
+                  @else if (a.must_change_password) { waiting for first sign-in }
                   @else if (a.last_login_at) { last sign-in {{ a.last_login_at | date:'d MMM y, HH:mm' }} }
                   @else { never signed in }
                 </p>
               </div>
-              <button type="button" (click)="reset(a)" [disabled]="busy()"
+              <button type="button" (click)="reset(a)" [disabled]="busy() || !a.is_active"
                       class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-700 text-gray-300
                              hover:border-blue-600 hover:text-white transition-colors disabled:opacity-40">
                 Reset password
+              </button>
+              <button type="button" (click)="toggleActive(a)" [disabled]="busy()"
+                      class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-700 text-gray-300
+                             hover:border-amber-600 hover:text-white transition-colors disabled:opacity-40">
+                {{ a.is_active ? 'Disable' : 'Enable' }}
               </button>
             </div>
           }
@@ -151,6 +157,18 @@ export class AccountsComponent implements OnInit {
         this.loadAccounts();
       },
       error: (e) => { this.busy.set(false); this.error.set(errorMessage(e, 'Could not create the account.')); },
+    });
+  }
+
+  /** Disabling also signs the patient out of any session they have open. */
+  toggleActive(a: PatientAccount): void {
+    if (this.busy()) return;
+    this.busy.set(true);
+    this.error.set(null);
+    const call = a.is_active ? this.api.deactivateAccount(a.username) : this.api.reactivateAccount(a.username);
+    call.subscribe({
+      next: () => { this.busy.set(false); this.loadAccounts(); },
+      error: (e) => { this.busy.set(false); this.error.set(errorMessage(e, 'Could not update the account.')); },
     });
   }
 

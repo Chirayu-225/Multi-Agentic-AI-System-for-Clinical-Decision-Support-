@@ -30,8 +30,12 @@ import hashlib
 import json
 import logging
 import os
+import random
 import threading
+import time
 from datetime import datetime, timezone
+
+from sqlalchemy.exc import IntegrityError
 
 from src.db.models import AuditEvent
 
@@ -39,6 +43,8 @@ logger = logging.getLogger("medsight.audit")
 
 GENESIS = "GENESIS"
 _lock = threading.Lock()
+# How many times to re-read the head and retry when another writer appended first.
+_APPEND_ATTEMPTS = 25
 
 
 def _enabled() -> bool:
@@ -68,6 +74,13 @@ def record(*, actor: str, action: str, role: str | None = None, resource: str = 
     if the request's own transaction fails or is rolled back (a failed attempt is
     exactly what an audit log needs to capture).
 
+    Concurrency: the chain must stay linear no matter how many threads or processes append.
+    The in-process lock below only covers one process. Across processes the guarantee comes from
+    the database: `prev_hash` has a UNIQUE index, so if two writers read the same head and both
+    try to append after it, exactly one INSERT succeeds and the other gets an IntegrityError,
+    re-reads the new head and tries again. No fork is possible; the cost is a retry under
+    contention, which is cheap because audit writes are tiny.
+
     critical=True: if the event cannot be written, raise instead of continuing -
     use for actions that must never happen unaudited (approvals, deletes).
     """
@@ -76,19 +89,27 @@ def record(*, actor: str, action: str, role: str | None = None, resource: str = 
     from src.db.session import SessionLocal  # local import: avoids a cycle at import time
     try:
         with _lock:
-            db = SessionLocal()
-            try:
-                last = db.query(AuditEvent).order_by(AuditEvent.id.desc()).first()
-                prev = last.hash if last else GENESIS
-                ev = {
-                    "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                    "actor": actor, "role": role, "action": action, "resource": resource,
-                    "outcome": outcome, "ip": ip, "detail": detail or {},
-                }
-                db.add(AuditEvent(**ev, prev_hash=prev, hash=compute_hash(prev, ev)))
-                db.commit()
-            finally:
-                db.close()
+            for attempt in range(_APPEND_ATTEMPTS):
+                db = SessionLocal()
+                try:
+                    last = db.query(AuditEvent).order_by(AuditEvent.id.desc()).first()
+                    prev = last.hash if last else GENESIS
+                    ev = {
+                        "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                        "actor": actor, "role": role, "action": action, "resource": resource,
+                        "outcome": outcome, "ip": ip, "detail": detail or {},
+                    }
+                    db.add(AuditEvent(**ev, prev_hash=prev, hash=compute_hash(prev, ev)))
+                    db.commit()
+                    break
+                except IntegrityError:
+                    # Another process appended after the head we read. Re-read and retry.
+                    db.rollback()
+                    if attempt == _APPEND_ATTEMPTS - 1:
+                        raise
+                    time.sleep(random.uniform(0, 0.01 * (attempt + 1)))
+                finally:
+                    db.close()
     except Exception:
         logger.exception("AUDIT WRITE FAILED action=%s outcome=%s", action, outcome)
         if critical:

@@ -1,20 +1,37 @@
 // src/app/components/report/report-upload.component.ts
 import { Component, OnDestroy, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Subscription } from 'rxjs';
+import { Subscription, timer } from 'rxjs';
 
 import { ApiService } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { ReviewStateService } from '../../services/review-state.service';
 import { errorMessage } from '../../services/error-message';
 import { LANGUAGES } from '../../services/languages';
-import { ReportAnalysis, AgentStep } from '../../models/report.model';
+import { ReportAnalysis, AgentStep, UploadJob } from '../../models/report.model';
 import { AgentActivityComponent } from '../shared/agent-activity.component';
 import { ReportResultComponent } from './report-result.component';
 
 const ALLOWED_EXT = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
 const MAX_BYTES = 20 * 1024 * 1024;
 const PATIENT_ID_RE = /^[A-Za-z0-9_.\- ]{1,64}$/;
+
+const POLL_MS = 2000;
+const STAGE_LABELS: Record<string, string> = {
+  queued: 'Queued…',
+  starting: 'Starting…',
+  retrying: 'Retrying after a temporary error…',
+  pipeline_start: 'Reading the report…',
+  tool_call: 'Running analysis tools…',
+  tool_result: 'Running analysis tools…',
+  orchestrator_complete: 'Analysis complete, writing summaries…',
+  generating_summaries: 'Writing summaries…',
+  verifier_start: 'Verifying summaries…',
+  verifier_complete: 'Verification complete…',
+  translating: 'Translating patient summary…',
+  saving: 'Saving report…',
+  pipeline_complete: 'Done',
+};
 
 function newReportId(): string {
   try {
@@ -143,6 +160,21 @@ function newReportId(): string {
         </div>
       }
 
+      <!-- Background-job progress -->
+      @if (loading()) {
+        <div class="mt-6" role="progressbar" aria-label="Analysis progress"
+             [attr.aria-valuenow]="progress()" aria-valuemin="0" aria-valuemax="100">
+          <div class="flex justify-between text-xs text-gray-400 mb-1.5">
+            <span>{{ stageLabel() }}</span>
+            <span class="font-mono">{{ progress() }}%</span>
+          </div>
+          <div class="h-2 rounded-full bg-gray-800 overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-blue-600 to-sky-500 transition-all duration-500"
+                 [style.width.%]="progress()"></div>
+          </div>
+        </div>
+      }
+
       <!-- Agent activity stream -->
       @if (loading() || agentSteps().length) {
         <app-agent-activity [steps]="agentSteps()" [loading]="loading()" class="mt-6 block" />
@@ -183,11 +215,15 @@ export class ReportUploadComponent implements OnDestroy {
   agentSteps     = signal<AgentStep[]>([]);
   uploadError    = signal<string | null>(null);
   isDragging     = signal(false);
+  progress       = signal(0);
+  stage          = signal('queued');
 
   readonly languages = LANGUAGES;
 
   private sub?: Subscription;
   private uploadSub?: Subscription;
+  private pollSub?: Subscription;
+  private finished = false;
 
   constructor(
     private api: ApiService,
@@ -281,50 +317,127 @@ export class ReportUploadComponent implements OnDestroy {
     this.result.set(null);
     this.agentSteps.set([]);
     this.uploadError.set(null);
+    this.progress.set(0);
+    this.stage.set('queued');
+    this.finished = false;
+    this.pollSub?.unsubscribe();
 
     // Live agent streaming (staff only; a failure here must not block the upload)
     this.sub?.unsubscribe();
     try {
       const stream = this.api.connectAgentStream(reportId);
       this.sub = stream.subscribe({
-        next: (step) => this.agentSteps.update(steps => [...steps, step]),
+        next: (step) => this.onStep(reportId, step),
         error: () => {},
       });
     } catch {
-      /* streaming is optional */
+      /* streaming is optional: polling below drives completion regardless */
     }
 
+    // POST returns 202 as soon as the file is validated; the analysis continues server-side.
     this.uploadSub?.unsubscribe();
     this.uploadSub = this.api
       .uploadReport(file, pid, this.reportDate, reportId, this.language || undefined)
       .subscribe({
-        next: (res) => {
-          this.result.set(res);
-          this.loading.set(false);
-          this.api.disconnectAgentStream(reportId);
-          this.reviewState.refresh();
+        next: () => this.startPolling(reportId),
+        error: (err) => this.fail(reportId, err),
+      });
+  }
+
+  stageLabel(): string {
+    return STAGE_LABELS[this.stage()] ?? 'Working…';
+  }
+
+  private setProgress(stage: string | undefined, percent: number | undefined): void {
+    if (typeof percent === 'number') this.progress.update((p) => Math.max(p, Math.min(100, percent)));
+    if (stage) this.stage.set(stage);
+  }
+
+  private onStep(reportId: string, step: AgentStep): void {
+    if (step.type === 'progress') {
+      this.setProgress(step.stage, step.percent);        // drives the bar only, not the activity log
+      return;
+    }
+    if (step.type === 'pipeline_error') {
+      this.fail(reportId, null, step.detail);
+      return;
+    }
+    this.agentSteps.update((steps) => [...steps, step]);
+    if (step.type === 'pipeline_complete') this.complete(reportId);
+  }
+
+  /** The websocket can miss events (late connect, dropped socket), so the job endpoint is the source of truth. */
+  private startPolling(reportId: string): void {
+    let errors = 0;
+    this.pollSub?.unsubscribe();
+    this.pollSub = timer(0, POLL_MS).subscribe(() => {
+      if (this.finished) return;
+      this.api.getUploadJob(reportId).subscribe({
+        next: (job: UploadJob) => {
+          errors = 0;
+          this.setProgress(job.stage, job.percent);
+          if (job.status === 'complete') this.complete(reportId);
+          else if (job.status === 'failed') this.fail(reportId, null, job.error ?? undefined);
         },
         error: (err) => {
-          this.loading.set(false);
-          this.api.disconnectAgentStream(reportId);
-          const status = err?.status;
-          if (status === 401) {
-            this.uploadError.set('Your session has expired — please sign in again.');
-          } else if (status === 413) {
-            this.uploadError.set(errorMessage(err, 'File is too large (maximum 20 MB).'));
-          } else if (status === 429) {
-            this.uploadError.set(errorMessage(err, 'Too many uploads — please wait a bit and try again.'));
-          } else {
-            this.uploadError.set(
-              errorMessage(err, 'Something went wrong processing this report. Please try again.')
-            );
+          // 401/404 are final (expired session / job no longer exists); network blips are retried.
+          // A server restart does not lose the job any more: it is queued in the database.
+          if (err?.status === 401 || err?.status === 404 || ++errors >= 5) {
+            this.fail(reportId, err);
           }
         },
       });
+    });
+  }
+
+  private complete(reportId: string): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.pollSub?.unsubscribe();
+    this.progress.set(100);
+    this.api.getReport(reportId).subscribe({
+      next: (res) => {
+        this.result.set(res);
+        this.loading.set(false);
+        this.api.disconnectAgentStream(reportId);
+        this.reviewState.refresh();
+      },
+      error: (err) => {
+        this.loading.set(false);
+        this.api.disconnectAgentStream(reportId);
+        this.uploadError.set(errorMessage(err, 'The analysis finished but the report could not be loaded. Please refresh.'));
+      },
+    });
+  }
+
+  private fail(reportId: string, err: any, detail?: string): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.pollSub?.unsubscribe();
+    this.uploadSub?.unsubscribe();
+    this.loading.set(false);
+    this.api.disconnectAgentStream(reportId);
+    const status = err?.status;
+    if (detail) {
+      this.uploadError.set(detail);
+    } else if (status === 401) {
+      this.uploadError.set('Your session has expired — please sign in again.');
+    } else if (status === 404) {
+      this.uploadError.set('The server lost track of this analysis (it may have restarted). Please upload again.');
+    } else if (status === 413) {
+      this.uploadError.set(errorMessage(err, 'File is too large (maximum 20 MB).'));
+    } else if (status === 429) {
+      this.uploadError.set(errorMessage(err, 'Too many uploads — please wait a bit and try again.'));
+    } else {
+      this.uploadError.set(
+        errorMessage(err, 'Something went wrong processing this report. Please try again.')
+      );
+    }
   }
 
   ngOnDestroy(): void {
     this.sub?.unsubscribe();
     this.uploadSub?.unsubscribe();
+    this.pollSub?.unsubscribe();
   }
 }

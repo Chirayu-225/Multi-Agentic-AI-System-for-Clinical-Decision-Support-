@@ -41,3 +41,6 @@ backend/eval/results/gold.json
 
 # Local patch files
 /*.patch
+
+# Claude Code local settings
+.claude/settings.local.json

@@ -123,9 +123,11 @@ CI gates: `pip-audit` (fails on anything new), `npm audit --omit=dev --audit-lev
   token in `sessionStorage`, so an XSS bug would expose it; hence the CI sink check.
   A production system would use short-lived tokens with a refresh/revocation list or
   httpOnly cookies.
-- **Tokens are not revocable and a reset does not end existing sessions.** Resetting a
-  patient's password does not invalidate a token they already hold (up to
-  `ACCESS_TOKEN_MINUTES`). Fixing this needs a per-user token version or a revocation list.
+- **Sessions can be ended.** Every token carries the account's `token_version` and is checked
+  against it (and the account's `is_active` flag) on every request. Changing or resetting a
+  password, or disabling the account, bumps the version and signs out every session issued
+  before. The cost is one small database read per request. Tokens from before this existed
+  count as version 0 and expire normally.
 - **Only patients can be created or reset through the API.** There is no admin role yet, so
   one clinician cannot create or reset another clinician; clinician accounts come from the
   `BOOTSTRAP_CLINICIAN_*` settings.

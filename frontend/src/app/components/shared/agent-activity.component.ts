@@ -11,6 +11,8 @@ const STEP_LABELS: Record<string, { label: string; icon: string }> = {
   verifier_start:      { label: 'Verification agent started',  icon: '🔍' },
   verifier_complete:   { label: 'Verification complete',       icon: '✅' },
   orchestrator_complete:{ label: 'Orchestrator complete',      icon: '🤖' },
+  translating:         { label: 'Translating patient summary', icon: '🌐' },
+  saving:              { label: 'Saving report',               icon: '💾' },
   pipeline_complete:   { label: 'Analysis complete',           icon: '🏁' },
 };
 

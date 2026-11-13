@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # .dockerignore keeps .env, databases, data/ and local venvs out of the image.
 COPY . .
 
-RUN mkdir -p data/chroma data/hf data/easyocr
+RUN mkdir -p data/chroma data/hf data/easyocr spool && chmod 700 spool
 
 EXPOSE 8000
 

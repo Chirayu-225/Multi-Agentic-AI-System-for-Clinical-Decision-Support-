@@ -6,6 +6,7 @@ import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
 import {
   ReportAnalysis,
+  UploadJob,
   PatientHistory,
   PatientTrends,
   PatientReportView,
@@ -37,14 +38,20 @@ export class ApiService {
     reportDate: string,
     reportId: string,
     language?: string
-  ): Observable<ReportAnalysis> {
+  ): Observable<UploadJob> {
     const form = new FormData();
     form.append('file', file);
     form.append('patient_id', patientId);
     form.append('report_date', reportDate);
     form.append('report_id', reportId);
     if (language) form.append('language', language);
-    return this.http.post<ReportAnalysis>(`${this.base}/report/upload`, form);
+    // 202 Accepted: the analysis runs as a background job; progress arrives over the websocket
+    // and via getUploadJob(). Fetch the finished report with getReport().
+    return this.http.post<UploadJob>(`${this.base}/report/upload`, form);
+  }
+
+  getUploadJob(reportId: string): Observable<UploadJob> {
+    return this.http.get<UploadJob>(`${this.base}/report/${reportId}/job`);
   }
 
   getReport(reportId: string): Observable<ReportAnalysis> {
@@ -160,6 +167,21 @@ export class ApiService {
   resetAccountPassword(username: string): Observable<PatientAccountWithSecret> {
     return this.http.post<PatientAccountWithSecret>(
       `${this.base}/admin/users/${encodeURIComponent(username)}/reset-password`,
+      {}
+    );
+  }
+
+  /** Disable a patient login and end any session it has open. */
+  deactivateAccount(username: string): Observable<PatientAccount> {
+    return this.http.post<PatientAccount>(
+      `${this.base}/admin/users/${encodeURIComponent(username)}/deactivate`,
+      {}
+    );
+  }
+
+  reactivateAccount(username: string): Observable<PatientAccount> {
+    return this.http.post<PatientAccount>(
+      `${this.base}/admin/users/${encodeURIComponent(username)}/reactivate`,
       {}
     );
   }
