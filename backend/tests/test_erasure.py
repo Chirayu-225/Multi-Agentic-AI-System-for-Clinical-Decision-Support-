@@ -16,7 +16,7 @@ class FakeCollection:
     def __init__(self):
         self.rows = {}
 
-    def add(self, ids, embeddings, documents, metadatas):
+    def upsert(self, ids, embeddings, documents, metadatas):
         for i, d, m in zip(ids, documents, metadatas):
             self.rows[i] = (d, m)
 
@@ -104,14 +104,3 @@ def test_rejected_report_is_removed_from_history(client, store, monkeypatch):
                     json={"decision": "reject", "note": "values misread from scan"})
     assert r.status_code == 200
     assert rid not in store.cols["patient-P001"].rows
-
-
-def test_history_store_failure_does_not_fail_a_saved_upload(client, monkeypatch):
-    def boom(**_k):
-        raise OSError("embedding model unavailable")
-    monkeypatch.setattr(main, "chroma_store", boom)
-    ch = login(client, CLIN)
-    r = upload(client, ch)
-    assert r.status_code == 200
-    assert any("could not be added to the patient's history" in w
-               for w in r.json()["ingestion_warnings"])

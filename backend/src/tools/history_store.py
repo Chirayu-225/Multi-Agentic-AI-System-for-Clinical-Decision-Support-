@@ -73,8 +73,9 @@ def store_report(patient_id: str, report_text: str, lab_values: list,
         "report_date": date_str,
         "lab_values_json": json.dumps(lab_values),
     }
-    collection.add(ids=[report_id], embeddings=[embedding],
-                   documents=[short_text], metadatas=[metadata])
+    # upsert, not add: the outbox delivers at-least-once, so the same report can arrive twice.
+    collection.upsert(ids=[report_id], embeddings=[embedding],
+                      documents=[short_text], metadatas=[metadata])
     return report_id
 
 
