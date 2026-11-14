@@ -1,0 +1,41 @@
+name: reliability
+
+# The default test run uses SQLite. These checks need a real PostgreSQL: row locking
+# (FOR UPDATE SKIP LOCKED job claims, concurrent review decisions), foreign-key enforcement and
+# the unique-predecessor constraint on the audit chain behave differently there, and several
+# real bugs were only visible on it.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-and-fault-injection:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: medsight_test      # must end in _test: conftest refuses any other name
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MEDSIGHT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/medsight_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r backend/requirements-dev.txt
+      - name: Full suite on PostgreSQL
+        working-directory: backend
+        run: python -m pytest tests -q
+      - name: Fault injection, queue concurrency and audit chain (verbose, so skips are visible)
+        working-directory: backend
+        run: python -m pytest tests/test_fault_injection.py tests/test_job_queue.py tests/test_audit_chain_concurrency.py -v -rs

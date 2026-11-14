@@ -55,6 +55,13 @@ services:
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
       - JOB_LEASE_SECONDS=${JOB_LEASE_SECONDS:-60}
       - JOB_QUEUE_MAX=${JOB_QUEUE_MAX:-200}
+      # Model protection: rate limit, circuit breaker, per-report call cap (see backend/.env.example).
+      - LLM_RPM=${LLM_RPM:-10}
+      - LLM_BREAKER_FAILURES=${LLM_BREAKER_FAILURES:-5}
+      - LLM_BREAKER_COOLDOWN_SECONDS=${LLM_BREAKER_COOLDOWN_SECONDS:-60}
+      - LLM_MAX_CALLS_PER_REPORT=${LLM_MAX_CALLS_PER_REPORT:-12}
+      - JOB_DEFER_MAX_SECONDS=${JOB_DEFER_MAX_SECONDS:-3600}
+      - OUTBOX_MAX_ATTEMPTS=${OUTBOX_MAX_ATTEMPTS:-8}
       # /metrics is off (404) unless this is set; then it needs "Authorization: Bearer <token>".
       - METRICS_TOKEN=${METRICS_TOKEN:-}
       # First-run accounts (created only if the username does not exist).

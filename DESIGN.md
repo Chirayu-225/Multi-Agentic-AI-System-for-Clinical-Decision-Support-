@@ -111,6 +111,10 @@ stateDiagram-v2
 | Audit write fails on a critical action (approval, delete) | The action fails. It never happens unaudited. |
 | WebSocket drops | The browser keeps polling the job endpoint. |
 | Queue is full | `503` + `Retry-After`; the rejected file is not kept. |
+| Model provider down for a long time | A circuit breaker (per model) opens after consecutive failures and later calls fail instantly instead of each report waiting out its own retries. The job is deferred (no attempt used) and tried again; meanwhile the preliminary report is visible. After `JOB_DEFER_MAX_SECONDS` the job finishes with clearly labelled degraded output rather than waiting forever. |
+| Process dies after the preliminary save, before the summaries | The preliminary report stays: lab flags, critical values and interactions are visible, marked preliminary, and cannot be approved. The job is retried and replaces the row in place. |
+| Vector store (ChromaDB) down | The report is saved and its history write waits in the outbox with retries; the report shows a warning until it succeeds, a different one if it is given up on. |
+| Verifier returns malformed output | One repair attempt; if still invalid the summary is marked unverified and needs explicit acknowledgement. |
 
 ## 8. Concurrency and scaling
 
@@ -132,12 +136,39 @@ stateDiagram-v2
 - No load test against the real model provider; the benchmark below measures the queue only.
 - Uploaded files in the spool are not encrypted at rest; the directory is private (0700) and files are deleted when the job ends.
 - No two-factor authentication, no alert rules on the metrics.
+- The circuit breaker and rate limiter are per process. Several processes sharing one API key do not know about each other's calls.
+- Gemini JSON mode was exercised against a fake model and the SDK's schema conversion, not against the live API. Run `python -m eval.frozen_gate --all` once with a key before relying on it.
+- A critical result is shown first in the queue; nothing pages anyone.
+
+## 12. AI reliability
+
+**Critical-value fast path.** The local, deterministic steps (extraction, ICMR flags, interactions, trends) finish before the first model call. Their result is saved at once as a `preliminary` report (`analysis_status`, `has_critical`); the review queue lists critical reports first. When the model steps finish, the same row is replaced by the `complete` report with its original timestamp. A preliminary report cannot be approved: the summaries a release would publish do not exist yet.
+
+**Circuit breaker and shared rate limit** (`src/resilience.py`, used in `src/llm.py`). Closed, open and half-open; only provider-health errors (429, 503, timeouts) count, a bad request does not. One breaker per model, so the fallback model is still usable when the main one is open. One token bucket per process (`LLM_RPM`, `LLM_BURST`) so concurrent workers do not spend the free-tier minute quota against each other. A job that finds the provider down raises `DeferJob`: requeued with a delay, attempt not charged.
+
+**Outbox** (`src/outbox.py`). The ChromaDB write cannot share the database transaction, so the event is written in the same transaction as the report and applied afterwards: claimed with a compare-and-swap lease, retried with backoff, idempotent (upsert by report id), marked dead after `OUTBOX_MAX_ATTEMPTS`. Rejection cancels a pending write; a write that races a rejection or an erasure undoes itself.
+
+**Call tracing and prompt versions** (`LlmCall`, `src/prompts.py`). Every model attempt records purpose, model, prompt version, status, latency, tokens and a *notional* cost (what the tokens would cost on a paid tier; real spend on the free tier is zero; prices are settings). No prompt or response text is stored. A prompt's version is a hash of its own text, so it changes exactly when the prompt does. `GET /admin/llm-usage` aggregates by prompt version. A per-report call budget (`LLM_MAX_CALLS_PER_REPORT`) bounds a runaway loop.
+
+**Structured verifier output.** The verifier returns JSON validated against a schema. A `FAIL` without a corrected text is invalid (the old text parser reported that as "corrected" with the text unchanged). One repair call at most; still invalid means unverified, never silently passed.
+
+**Clinician feedback** (`src/ai_quality.py`). Each approved edit stores a word-level change ratio against the model's original. `GET /admin/ai-quality` reports unedited/edited/rejected rates, median edit size and how often the verifier missed something a clinician then edited, per prompt version and model, and marks groups under 20 reviews as not enough data.
+
+**Evaluation gate** (`eval/frozen_gate.py`). Eight frozen synthetic cases. Runs only the components whose prompt version changed (everything if the model changed), refuses to start past `GATE_MAX_CALLS` or `GATE_DAILY_CALLS`, stops mid-run at the cap (repair calls included), and fails on a regression of more than one case. On demand, never in CI.
+
+**Safety log** (`SAFETY.md`). Hazards, controls and the test that proves each control; `tests/test_safety_log.py` fails if one of them loses its test.
+
+**CI** (`.github/workflows/reliability.yml`). Full suite and the fault-injection tests on a real PostgreSQL 16 service.
+
+Two defects were found only by running on PostgreSQL: report and agent-run rows saved together without ordered inserts, and patient erasure deleting reports before the rows that reference them.
 
 ## 11. Checking the claims
 
 ```
 cd backend
 python -m pytest -q                                   # unit and integration tests, incl. crash/retry/lease tests
+python scripts/run_tests_on_postgres.py               # same tests on a throwaway PostgreSQL (needs: pip install pgserver)
+python -m eval.frozen_gate --dry-run                  # what the prompt/model gate would run, and how many calls it would use
 python scripts/bench_queue.py --jobs 300 --workers 4 --work-ms 50
 ```
 

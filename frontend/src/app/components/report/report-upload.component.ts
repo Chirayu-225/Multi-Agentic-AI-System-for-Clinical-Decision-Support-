@@ -21,6 +21,7 @@ const STAGE_LABELS: Record<string, string> = {
   queued: 'Queued…',
   starting: 'Starting…',
   retrying: 'Retrying after a temporary error…',
+  waiting_for_ai: 'AI service busy - lab flags are already available to your clinician; waiting to finish the summary…',
   pipeline_start: 'Reading the report…',
   tool_call: 'Running analysis tools…',
   tool_result: 'Running analysis tools…',

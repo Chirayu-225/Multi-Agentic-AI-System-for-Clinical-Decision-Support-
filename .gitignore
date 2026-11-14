@@ -44,3 +44,5 @@ backend/eval/results/gold.json
 
 # Claude Code local settings
 .claude/settings.local.json
+
+backend/eval/results/gate_ledger.json
