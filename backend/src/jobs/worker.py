@@ -29,6 +29,7 @@ logger = logging.getLogger("medsight.jobs")
 obs.describe("jobs_claimed_total", "Jobs handed to a worker (a retried job counts each time).")
 obs.describe("jobs_finished_total", "Jobs that reached a terminal state, by status.")
 obs.describe("job_retries_total", "Attempts that failed and were requeued.")
+obs.describe("job_deferred_total", "Attempts postponed (not failed) because the AI service was unavailable.")
 obs.describe("job_lease_lost_total", "Runs abandoned because another worker owned the job.")
 obs.describe("job_duration_seconds", "Wall-clock time of one job attempt.")
 
@@ -152,6 +153,12 @@ class JobWorker:
             # Shutdown while running: hand the job back, this attempt does not count.
             await self._db(q.release, job.id, job.worker_id)
             raise
+        except q.DeferJob as d:
+            if await self._db(q.defer, job.id, job.worker_id, d.delay_seconds):
+                obs.inc("job_deferred_total")
+                logger.warning("job deferred %.0fs: %s", d.delay_seconds, d.reason)
+            else:
+                obs.inc("job_lease_lost_total")
         except Exception as exc:  # noqa: BLE001 - every failure goes through the retry policy
             permanent = isinstance(exc, q.PermanentJobError)
             final = permanent or job.is_last_attempt

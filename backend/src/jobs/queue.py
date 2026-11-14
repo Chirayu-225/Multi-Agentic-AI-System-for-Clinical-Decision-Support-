@@ -57,6 +57,17 @@ class PermanentJobError(Exception):
     failed immediately instead of burning the remaining attempts."""
 
 
+class DeferJob(Exception):
+    """Raise from the job body when the work cannot proceed *yet* for a reason that is not the
+    job's fault (the model provider is down). The job goes back to the queue after `delay_seconds`
+    and this attempt does not count, so waiting out an outage never uses up the retry budget."""
+
+    def __init__(self, delay_seconds: float, reason: str = "waiting for the AI service"):
+        super().__init__(reason)
+        self.delay_seconds = max(float(delay_seconds), 1.0)
+        self.reason = reason
+
+
 def utcnow() -> datetime:
     # Naive UTC, matching the rest of the schema (DateTime columns without a timezone).
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -81,6 +92,7 @@ class JobSnapshot:
     attempts: int
     max_attempts: int
     worker_id: str | None = None
+    created_at: datetime | None = None
 
     @property
     def is_last_attempt(self) -> bool:
@@ -92,7 +104,7 @@ def _snapshot(row: UploadJob) -> JobSnapshot:
         id=row.id, owner=row.owner, ip=row.ip, patient_id=row.patient_id, filename=row.filename,
         ext=row.ext, report_date=row.report_date, language=row.language or "en",
         spool_path=row.spool_path, attempts=row.attempts, max_attempts=row.max_attempts,
-        worker_id=row.locked_by,
+        worker_id=row.locked_by, created_at=row.created_at,
     )
 
 
@@ -265,6 +277,20 @@ def fail_or_retry(db: Session, job_id: str, worker_id: str, error: str, *, retry
                        next_attempt_at=now + timedelta(seconds=delay)))
     db.commit()
     return "retry"
+
+
+def defer(db: Session, job_id: str, worker_id: str, delay_seconds: float, stage: str = "waiting_for_ai",
+          now: datetime | None = None) -> bool:
+    """Requeue a running job for later without charging the attempt (see DeferJob)."""
+    now = now or utcnow()
+    n = db.execute(
+        update(UploadJob)
+        .where(UploadJob.id == job_id, UploadJob.locked_by == worker_id, UploadJob.status == RUNNING)
+        .values(status=QUEUED, stage=stage, locked_by=None, lease_expires_at=None,
+                next_attempt_at=now + timedelta(seconds=delay_seconds), attempts=UploadJob.attempts - 1)
+    ).rowcount
+    db.commit()
+    return n == 1
 
 
 def release(db: Session, job_id: str, worker_id: str, now: datetime | None = None) -> bool:

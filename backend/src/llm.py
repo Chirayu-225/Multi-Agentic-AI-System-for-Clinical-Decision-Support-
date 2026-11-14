@@ -32,6 +32,11 @@ import contextvars
 import logging
 import os
 
+import time
+
+from src import observability as obs
+from src.resilience import CircuitBreaker, CircuitOpen, RateLimiter
+
 logger = logging.getLogger("medsight")
 
 # gemini-2.5-flash is not deprecated, but Google limits it to API keys that used it
@@ -42,10 +47,104 @@ MODEL = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
 FALLBACK_MODEL = (os.getenv("GEMINI_FALLBACK_MODEL") or "").strip() or None
 TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
 
+# Provider-health protection (see src/resilience.py). One breaker per model, because the fallback
+# model exists precisely for when the main one is overloaded; one rate limiter for the whole
+# process, because the quota belongs to the API key, not to a model.
+BREAKER_THRESHOLD = int(os.getenv("LLM_BREAKER_FAILURES", "5"))
+BREAKER_COOLDOWN = float(os.getenv("LLM_BREAKER_COOLDOWN_SECONDS", "60"))
+llm_limiter = RateLimiter(rate_per_minute=float(os.getenv("LLM_RPM", "0")),
+                          burst=int(os.getenv("LLM_BURST", "5")))
+_breakers: dict[str, CircuitBreaker] = {}
+
+
+def get_breaker(model: str | None = None) -> CircuitBreaker:
+    key = model or MODEL
+    if key not in _breakers:
+        _breakers[key] = CircuitBreaker(failure_threshold=BREAKER_THRESHOLD, cooldown_seconds=BREAKER_COOLDOWN)
+    return _breakers[key]
+
+
+def llm_unavailable_for() -> float:
+    """Seconds until the model path is worth trying again; 0 if it is usable now.
+    Unavailable only when the main model is open AND there is no usable fallback."""
+    main = get_breaker(MODEL).retry_after()
+    if main <= 0:
+        return 0.0
+    if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
+        fb = get_breaker(FALLBACK_MODEL).retry_after()
+        return min(main, fb) if fb > 0 else 0.0
+    return main
+
+
 _client = None
 
 # Models that actually answered during the current request (set by begin_model_tracking).
 _models_used: contextvars.ContextVar[set | None] = contextvars.ContextVar("models_used", default=None)
+
+
+class LlmBudgetExceeded(Exception):
+    """One report tried to make more model calls than LLM_MAX_CALLS_PER_REPORT allows.
+    A runaway loop (a retry bug, a tool-calling cycle) must cost a bounded amount of quota."""
+
+
+obs.describe("llm_calls_total", "Model call attempts by purpose and outcome.")
+obs.describe("llm_tokens_total", "Tokens used, by direction (input/output).")
+obs.describe("llm_call_duration_seconds", "Wall-clock time of one model call attempt, by purpose.")
+
+# Per-request trace of every model call attempt (set by begin_call_tracking, read by the caller).
+# Holds metadata only - purpose, model, status, latency, token counts - never prompt or response text.
+_calls_var: contextvars.ContextVar[list | None] = contextvars.ContextVar("llm_calls", default=None)
+_budget_var: contextvars.ContextVar[list | None] = contextvars.ContextVar("llm_budget", default=None)
+
+
+def begin_call_tracking(max_calls: int | None = None) -> list:
+    """Start recording model call attempts for this request/job; returns the live list."""
+    calls: list = []
+    _calls_var.set(calls)
+    _budget_var.set([max_calls, 0] if max_calls else None)
+    return calls
+
+
+def _spend_budget() -> None:
+    b = _budget_var.get()
+    if b is None:
+        return
+    if b[1] >= b[0]:
+        raise LlmBudgetExceeded(f"more than {b[0]} model calls for one report")
+    b[1] += 1
+
+
+def _usage(result) -> tuple[int, int]:
+    """Token counts from a response (or from a tuple that contains one, as the chat-opening call
+    returns). Zeros when the SDK reports none - never an exception: tracing must not break a call."""
+    for r in (result if isinstance(result, tuple) else (result,)):
+        meta = getattr(r, "usage_metadata", None)
+        if meta is not None:
+            try:
+                return (int(getattr(meta, "prompt_token_count", 0) or 0),
+                        int(getattr(meta, "candidates_token_count", 0) or 0))
+            except (TypeError, ValueError):
+                return 0, 0
+    return 0, 0
+
+
+def _record_call(label: str, model: str | None, attempt: int, status: str, started: float,
+                 result=None, error: Exception | None = None) -> None:
+    purpose = label.split("/")[0].lower()
+    tokens_in, tokens_out = _usage(result) if result is not None else (0, 0)
+    latency = max(time.monotonic() - started, 0.0)
+    obs.inc("llm_calls_total", purpose=purpose, status=status)
+    if tokens_in or tokens_out:
+        obs.inc("llm_tokens_total", tokens_in, direction="input")
+        obs.inc("llm_tokens_total", tokens_out, direction="output")
+    if status not in ("circuit_open", "budget"):
+        obs.observe("llm_call_duration_seconds", latency, purpose=purpose)
+    calls = _calls_var.get()
+    if calls is not None:
+        calls.append({"purpose": purpose, "model": model or MODEL, "attempt": attempt, "status": status,
+                      "error_class": type(error).__name__ if error else None,
+                      "latency_ms": int(latency * 1000), "input_tokens": tokens_in,
+                      "output_tokens": tokens_out})
 
 
 def begin_model_tracking() -> set:
@@ -94,16 +193,41 @@ def is_retryable(err: Exception) -> bool:
     return is_rate_limit(err) or is_unavailable(err)
 
 
-async def with_retry(call, *, label: str, attempts: int = 3, base_wait: int = 20):
+async def with_retry(call, *, label: str, attempts: int = 3, base_wait: int = 20,
+                     breaker: CircuitBreaker | None = None, model: str | None = None):
     """Run an async callable, backing off on rate limits, overload and timeouts only.
-    Other errors (bad key, bad request, invalid model) propagate immediately."""
+    Other errors (bad key, bad request, invalid model) propagate immediately.
+
+    Every attempt first asks the circuit breaker (fail fast with CircuitOpen while the provider is
+    down) and then the shared rate limiter. Only provider-health failures count against the
+    breaker; an error the provider answered with (a bad request) proves it is up."""
+    breaker = breaker or get_breaker()
     last = None
     for attempt in range(attempts):
         try:
-            return await call()
+            breaker.allow()
+            _spend_budget()
+        except CircuitOpen as e:
+            _record_call(label, model, attempt + 1, "circuit_open", time.monotonic(), error=e)
+            raise
+        except LlmBudgetExceeded as e:
+            _record_call(label, model, attempt + 1, "budget", time.monotonic(), error=e)
+            raise
+        await llm_limiter.acquire()
+        started = time.monotonic()
+        try:
+            result = await call()
+        except asyncio.CancelledError:
+            breaker.cancel_probe()
+            raise
         except Exception as e:  # noqa: BLE001 - classified below
+            _record_call(label, model, attempt + 1,
+                         "rate_limited" if is_rate_limit(e) else ("unavailable" if is_unavailable(e) else "error"),
+                         started, error=e)
             if not is_retryable(e):
+                breaker.record_success()
                 raise
+            breaker.record_failure()
             last = e
             if attempt == attempts - 1:
                 break
@@ -113,6 +237,10 @@ async def with_retry(call, *, label: str, attempts: int = 3, base_wait: int = 20
                            "rate limited" if is_rate_limit(e) else f"unavailable ({type(e).__name__})",
                            wait, attempt + 1, attempts)
             await asyncio.sleep(wait)
+        else:
+            breaker.record_success()
+            _record_call(label, model, attempt + 1, "ok", started, result=result)
+            return result
     raise last
 
 
@@ -121,28 +249,37 @@ async def with_fallback(make_call, *, label: str, attempts: int = 3, base_wait: 
     and GEMINI_FALLBACK_MODEL is set, try the fallback (with retries). Returns
     (result, model_that_answered)."""
     try:
-        result = await with_retry(lambda: make_call(MODEL), label=label,
-                                  attempts=attempts, base_wait=base_wait)
+        result = await with_retry(lambda: make_call(MODEL), label=label, attempts=attempts,
+                                  base_wait=base_wait, breaker=get_breaker(MODEL), model=MODEL)
         note_model(MODEL)
         return result, MODEL
     except Exception as e:  # noqa: BLE001
-        if not (FALLBACK_MODEL and FALLBACK_MODEL != MODEL and is_retryable(e)):
+        # CircuitOpen on the main model also means "try the fallback" (its own breaker decides).
+        if not (FALLBACK_MODEL and FALLBACK_MODEL != MODEL and (is_retryable(e) or isinstance(e, CircuitOpen))):
             raise
         logger.warning("%s: %s unavailable after retries (%s); using fallback %s",
                        label, MODEL, type(e).__name__, FALLBACK_MODEL)
     result = await with_retry(lambda: make_call(FALLBACK_MODEL), label=f"{label}/fallback",
-                              attempts=attempts, base_wait=base_wait)
+                              attempts=attempts, base_wait=base_wait, breaker=get_breaker(FALLBACK_MODEL), model=FALLBACK_MODEL)
     note_model(FALLBACK_MODEL)
     return result, FALLBACK_MODEL
 
 
 async def generate_text(prompt: str, *, system_instruction: str | None = None,
-                        label: str = "LLM", attempts: int = 3, base_wait: int = 35) -> str:
-    """Single-turn text generation used by the summarizer, verifier and translator."""
+                        label: str = "LLM", attempts: int = 3, base_wait: int = 35,
+                        json_schema=None) -> str:
+    """Single-turn text generation used by the summarizer, verifier and translator.
+    With `json_schema` (a pydantic model) Gemini is asked for JSON matching it; the caller still
+    validates the result, because a schema request is a strong hint, not a guarantee."""
     from google.genai import types
 
-    config = types.GenerateContentConfig(system_instruction=system_instruction) \
-        if system_instruction else None
+    kwargs = {}
+    if system_instruction:
+        kwargs["system_instruction"] = system_instruction
+    if json_schema is not None:
+        kwargs["response_mime_type"] = "application/json"
+        kwargs["response_schema"] = json_schema
+    config = types.GenerateContentConfig(**kwargs) if kwargs else None
 
     async def _call(model: str):
         resp = await get_client().aio.models.generate_content(

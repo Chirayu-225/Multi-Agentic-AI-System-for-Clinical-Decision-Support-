@@ -148,12 +148,12 @@ async def _execute_tool(tool_name: str, tool_args: dict) -> dict:
 MAX_REPORT_CHARS = 20000
 
 
-async def _send_with_retry(chat, message, max_attempts: int = 3):
+async def _send_with_retry(chat, message, max_attempts: int = 3, model: str | None = None):
     """Send one turn on the chat session, backing off on rate limits (shared policy in
     src/llm.py). The chat keeps the model's full previous turn — including Gemini 3's
     thought signatures — in its history, which multi-turn tool calling requires."""
     return await with_retry(lambda: chat.send_message(message),
-                            label="ORCHESTRATOR", attempts=max_attempts, base_wait=20)
+                            label="ORCHESTRATOR", attempts=max_attempts, base_wait=20, model=model)
 
 
 def _summarize_for_prompt(entities: dict, rule_flags: list, trend_flags: list,
@@ -195,6 +195,7 @@ async def run_orchestrator(
     patient_id: str,
     report_date: str = "",
     on_step: Callable[[dict], None] = None,
+    on_preliminary: Callable[[dict], object] = None,
 ) -> dict:
     """
     Run the orchestrator on a medical report.
@@ -360,6 +361,22 @@ async def run_orchestrator(
     prior_visit_count = len(history_list) if isinstance(history_list, list) else 0
     _log_step("get_patient_history", history_args, {"report_count": prior_visit_count})
 
+    # ── Preliminary results ────────────────────────────────────────────────
+    # Everything above is deterministic and local. Hand it to the caller NOW, before the first
+    # model call, so a critical value can reach a clinician even if the model is slow or down.
+    # Whatever the callback does, it must not be able to break the analysis.
+    if on_preliminary is not None:
+        try:
+            from src.flagging.risk_flagging import compute_risk_summary
+            snap = compute_risk_summary(accumulated_data["rule_flags"], accumulated_data["trend_flags"],
+                                        accumulated_data["baseline_flags"])
+            result = on_preliminary({**accumulated_data,
+                                     "risk_summary": {**snap, "overall_severity": str(snap["overall_severity"])}})
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:  # noqa: BLE001
+            logger.exception("preliminary hook failed; continuing with the full analysis")
+
     # ── Agentic phase — only the 3 genuinely conditional tools ──────────────
     from google.genai import types
     system_prompt = ORCHESTRATOR_SYSTEM_PROMPT
@@ -500,7 +517,7 @@ this turn.
                 # back data it already has, which risks the same repeat again.
                 break
 
-            response = await _send_with_retry(chat, tool_results)
+            response = await _send_with_retry(chat, tool_results, model=model_used)
             llm_calls += 1
     except Exception as e:  # noqa: BLE001
         logger.warning("Orchestrator model step failed (%s); continuing without optional tools",

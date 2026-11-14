@@ -107,6 +107,7 @@ def _add_missing_columns():
 _INDEXES = (
     ("ix_reports_patient_created", 'CREATE INDEX IF NOT EXISTS ix_reports_patient_created ON reports (patient_id, created_at)'),
     ("ix_reports_review_status", 'CREATE INDEX IF NOT EXISTS ix_reports_review_status ON reports (review_status)'),
+    ("ix_outbox_due", 'CREATE INDEX IF NOT EXISTS ix_outbox_due ON outbox_events (status, next_attempt_at)'),
     ("ix_upload_jobs_claim", 'CREATE INDEX IF NOT EXISTS ix_upload_jobs_claim ON upload_jobs (status, next_attempt_at)'),
     # UNIQUE: keeps the audit hash chain linear. Creating it fails if an old chain already has
     # a fork; that is logged loudly rather than crashing startup.

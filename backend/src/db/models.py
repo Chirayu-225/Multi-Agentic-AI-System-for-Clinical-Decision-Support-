@@ -3,7 +3,7 @@ src/db/models.py
 PostgreSQL models via SQLAlchemy.
 """
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, JSON, Integer, Text, ForeignKey, Boolean, Index
+from sqlalchemy import Column, String, DateTime, JSON, Integer, Text, ForeignKey, Boolean, Index, Float
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -52,6 +52,15 @@ class Report(Base):
     forecast_flags         = Column(JSON)   # Tier 3 — slope-based threshold projections
     similar_history         = Column(JSON)  # Tier 4 — semantic recall of past episodes
 
+    # ── Analysis lifecycle ─────────────────────────────────────────────────
+    # "preliminary": the deterministic results (lab flags, critical values, interactions) are
+    # saved the moment they exist, before any model call, so a critical value is visible to a
+    # clinician in seconds - and still visible if the model provider is down for an hour.
+    # "complete": summaries and verification are done. NULL (older rows) means complete.
+    # A preliminary report cannot be approved (the summaries it would release do not exist yet).
+    analysis_status = Column(String, default="complete")
+    has_critical    = Column(Boolean)   # any CRITICAL lab flag; lets the queue surface it first
+
     # ── Human-in-the-loop release ──────────────────────────────────────────
     # A report is "pending_review" until a named clinician approves it. Patient
     # accounts can only ever see approved reports. NULL (rows created before
@@ -66,6 +75,8 @@ class Report(Base):
     ai_clinical_summary   = Column(Text)
     ai_patient_summary    = Column(Text)
     review_edited         = Column(Boolean)   # True if the clinician changed either summary
+    edit_ratio            = Column(Float)     # 0..1 word-level change vs the AI text (src/ai_quality.py)
+    edit_words_changed    = Column(Integer)   # words inserted + deleted by the clinician
     warnings_acknowledged = Column(Boolean)   # True if approved with warnings explicitly accepted
     uploaded_by   = Column(String)
 
@@ -108,7 +119,29 @@ class AgentRun(Base):
     duration_ms  = Column(Integer)   # wall-clock for the whole pipeline
     llm_calls    = Column(Integer)   # Gemini round trips made for this report
     model        = Column(String)    # exact model id that produced this run (see src/llm.py)
+    prompt_versions = Column(JSON)   # {"summarizer": "summarizer@4e8f94dc1f", ...} see src/prompts.py
     created_at   = Column(DateTime, default=datetime.utcnow)
+
+
+class LlmCall(Base):
+    """One model call attempt (a retry is its own row). Metadata only: no prompt or response text,
+    so it holds no PHI and is safe to aggregate. No foreign key to reports: calls made by a job
+    that was deferred or failed are recorded too, and erasure deletes them by report id."""
+    __tablename__ = "llm_calls"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    report_id     = Column(String, index=True)
+    created_at    = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    purpose       = Column(String, nullable=False)       # orchestrator|summarizer|verifier|translator
+    model         = Column(String)
+    prompt_version = Column(String)                      # e.g. "summarizer@4e8f94dc1f"
+    attempt       = Column(Integer)                      # attempt number inside with_retry
+    status        = Column(String, nullable=False)       # ok|rate_limited|unavailable|error|circuit_open|budget
+    error_class   = Column(String)
+    latency_ms    = Column(Integer)
+    input_tokens  = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    cost_usd      = Column(Float, default=0.0)           # NOTIONAL: what this would cost on a paid tier
 
 
 class User(Base):
@@ -201,3 +234,31 @@ class UploadJob(Base):
         # The claim query filters on status and orders by age; this keeps it an index scan.
         Index("ix_upload_jobs_claim", "status", "next_attempt_at"),
     )
+
+
+class OutboxEvent(Base):
+    """A side effect that must happen if (and only if) its database transaction committed.
+
+    The report row and its history-store (ChromaDB) write live in two systems with no shared
+    transaction. Writing the event in the SAME transaction as the report means a crash can never
+    leave "report saved, history update forgotten": the relay applies pending events with retries,
+    and the handler is idempotent (upsert by report id), so at-least-once delivery is safe.
+    The payload is the already-redacted text, the same content the vector store holds; it is
+    deleted with the patient (erasure) and cancelled when a report is rejected.
+    """
+    __tablename__ = "outbox_events"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    kind         = Column(String, nullable=False)                  # e.g. "history.index"
+    report_id    = Column(String, nullable=False, index=True)
+    patient_id   = Column(String, nullable=False, index=True)
+    payload      = Column(JSON)
+    status       = Column(String, nullable=False, default="pending")   # pending|done|dead|cancelled
+    attempts     = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False)             # also the lease while being applied
+    last_error   = Column(Text)
+    created_at   = Column(DateTime, nullable=False)
+    done_at      = Column(DateTime)
+
+    __table_args__ = (Index("ix_outbox_due", "status", "next_attempt_at"),)
+
