@@ -91,6 +91,44 @@ def _build_context(entities: dict, flags: list, trend_flags: list,
     return "\n".join(lines)
 
 
+def _build_prompt(context: str, flag_lines: str, has_trends: bool) -> str:
+    """The summarizer's whole prompt. Its source text is the prompt's version (src/prompts.py):
+    change a word here and the version recorded on every model call changes with it."""
+    return f"""You are a clinical decision support assistant for Indian healthcare.
+Given the following verified patient data, produce ALL of the following outputs in ONE response.
+Format your response EXACTLY as shown with these section headers.
+
+PATIENT DATA:
+{context}
+
+ABNORMAL FLAGS TO EXPLAIN:
+{flag_lines if flag_lines else "None"}
+
+---
+SECTION: CLINICAL_SUMMARY
+Write a concise clinical summary (150 words max) for a GP. Only use values from the data above.
+
+SECTION: PATIENT_SUMMARY
+Explain results to the patient in plain language (100 words max). Simple, honest, not alarming.
+
+SECTION: FLAG_EXPLANATIONS
+For each FLAG_N above, write one sentence explanation referencing the ICMR guideline and recommended action.
+Format: FLAG_0: <explanation>
+
+SECTION: FOLLOWUP_ACTIONS
+List 3 specific numbered follow-up actions for the GP based on the findings.
+
+SECTION: LONGITUDINAL_NARRATIVE
+{"Write a short (80 words max) narrative tracing this patient's trajectory across visits, "
+ "using ONLY the 'Longitudinal trends' and 'Personal-baseline deviations' values listed "
+ "above (cite the actual values and the visit-over-visit direction; if a value is flagged "
+ "only as a personal-baseline deviation, note that it may still be within the general "
+ "population's normal range). Do not speculate about a diagnosis or cause — describe the "
+ "pattern only, and end with one sentence on why a clinician should look at the trend, not "
+ "just the latest value." if has_trends else "Write exactly: N/A"}
+"""
+
+
 async def generate_summaries(
     entities: dict,
     flags: list,
@@ -127,39 +165,7 @@ async def generate_summaries(
 
     has_trends = bool(trend_flags) or bool(baseline_flags)
 
-    prompt = f"""You are a clinical decision support assistant for Indian healthcare.
-Given the following verified patient data, produce ALL of the following outputs in ONE response.
-Format your response EXACTLY as shown with these section headers.
-
-PATIENT DATA:
-{context}
-
-ABNORMAL FLAGS TO EXPLAIN:
-{flag_lines if flag_lines else "None"}
-
----
-SECTION: CLINICAL_SUMMARY
-Write a concise clinical summary (150 words max) for a GP. Only use values from the data above.
-
-SECTION: PATIENT_SUMMARY
-Explain results to the patient in plain language (100 words max). Simple, honest, not alarming.
-
-SECTION: FLAG_EXPLANATIONS
-For each FLAG_N above, write one sentence explanation referencing the ICMR guideline and recommended action.
-Format: FLAG_0: <explanation>
-
-SECTION: FOLLOWUP_ACTIONS
-List 3 specific numbered follow-up actions for the GP based on the findings.
-
-SECTION: LONGITUDINAL_NARRATIVE
-{"Write a short (80 words max) narrative tracing this patient's trajectory across visits, "
- "using ONLY the 'Longitudinal trends' and 'Personal-baseline deviations' values listed "
- "above (cite the actual values and the visit-over-visit direction; if a value is flagged "
- "only as a personal-baseline deviation, note that it may still be within the general "
- "population's normal range). Do not speculate about a diagnosis or cause — describe the "
- "pattern only, and end with one sentence on why a clinician should look at the trend, not "
- "just the latest value." if has_trends else "Write exactly: N/A"}
-"""
+    prompt = _build_prompt(context, flag_lines, has_trends)
 
     unavailable = lambda why: {  # noqa: E731
         "clinical_summary": f"Summary unavailable{why}.",

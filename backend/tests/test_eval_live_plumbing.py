@@ -8,8 +8,8 @@ def test_live_verifier_eval_plumbing(monkeypatch):
     import src.agents.verifier as verifier
 
     async def fake_generate(prompt, **_k):
-        return ("VERDICT_CLINICAL: FAIL\nISSUES_CLINICAL: bad\nCORRECTED_CLINICAL: fixed\n"
-                "VERDICT_PATIENT: PASS\nISSUES_PATIENT: none\n")
+        return ('{"clinical": {"verdict": "FAIL", "issues": ["bad"], "corrected": "fixed"},'
+                ' "patient": {"verdict": "PASS", "issues": [], "corrected": null}}')
 
     monkeypatch.setattr(verifier, "generate_text", fake_generate)
     out = ev.eval_live_verifier(generate_dataset(6, 1), limit=4)

@@ -18,7 +18,10 @@ them purely to avoid tripping the rate limit — auditing both in one prompt rem
 call and the sleep, since there's nothing left to space out.
 """
 
+import json
 import re
+
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
 from src.llm import generate_text, is_rate_limit
 
@@ -41,14 +44,29 @@ Rules (apply to each summary separately):
 3. If a summary is consistent with the ground truth, its verdict is PASS
 4. Always list specific issues found for each summary, or "none" if clean
 
-Output format (strictly follow this — both blocks required, in this order):
-VERDICT_CLINICAL: PASS or FAIL
-ISSUES_CLINICAL: <specific unsupported claims, or "none">
-CORRECTED_CLINICAL: <only if VERDICT_CLINICAL is FAIL — rewrite using only ground truth data>
-VERDICT_PATIENT: PASS or FAIL
-ISSUES_PATIENT: <specific unsupported claims, or "none">
-CORRECTED_PATIENT: <only if VERDICT_PATIENT is FAIL — rewrite using only ground truth data>
+Output: ONLY a JSON object, no prose and no code fences, exactly this shape:
+{"clinical": {"verdict": "PASS" or "FAIL", "issues": [<each unsupported claim as a string>],
+              "corrected": <string, REQUIRED when verdict is FAIL: the summary rewritten using only
+              ground-truth data; null when PASS>},
+ "patient":  {"verdict": "PASS" or "FAIL", "issues": [...], "corrected": ...}}
+"issues" is an empty list when a summary is clean.
 """
+
+
+def _build_audit_prompt(ground_truth: str, clinical_summary: str, patient_summary: str) -> str:
+    """The verifier's user prompt. With VERIFIER_SYSTEM_PROMPT it defines the verifier's version
+    (src/prompts.py)."""
+    return f"""GROUND TRUTH DATA (the only facts that exist in this patient's report):
+{ground_truth}
+
+CLINICAL SUMMARY TO AUDIT:
+{clinical_summary}
+
+PATIENT SUMMARY TO AUDIT:
+{patient_summary}
+
+Audit BOTH summaries against the ground truth, independently. Does either contain any values,
+conditions, or medications NOT present in the ground truth?"""
 
 
 def _build_ground_truth(entities: dict, flags: list, trend_flags: list,
@@ -103,32 +121,79 @@ def _build_ground_truth(entities: dict, flags: list, trend_flags: list,
     return "\n".join(lines) if lines else "No clinical data extracted."
 
 
-def _parse_side(text: str, suffix: str, fallback_summary: str) -> dict:
-    """Extract one summary's VERDICT/ISSUES/CORRECTED block for the given suffix
-    (CLINICAL or PATIENT) out of the combined audit response."""
-    verdict_match = re.search(rf"VERDICT_{suffix}:\s*(PASS|FAIL)", text, re.IGNORECASE)
-    passed = bool(verdict_match) and verdict_match.group(1).upper() == "PASS"
+class SideAudit(BaseModel):
+    verdict: str
+    # No defaults on purpose: the Gemini schema rejects/ignores them inconsistently, so every field
+    # is required and the prompt shows all three.
+    issues: list[str]
+    corrected: str | None
 
-    # Stop at the next labeled section (either side's own CORRECTED_, or the
-    # other side's VERDICT_) so PATIENT's block doesn't swallow CLINICAL's,
-    # and CORRECTED_CLINICAL doesn't run on into VERDICT_PATIENT.
-    issues_match = re.search(
-        rf"ISSUES_{suffix}:\s*(.+?)(?:\n(?:CORRECTED_{suffix}|VERDICT_CLINICAL|VERDICT_PATIENT):|$)",
-        text, re.IGNORECASE | re.DOTALL,
-    )
-    issues = issues_match.group(1).strip() if issues_match else ""
+    @field_validator("verdict")
+    @classmethod
+    def _verdict(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if v not in ("PASS", "FAIL"):
+            raise ValueError("verdict must be PASS or FAIL")
+        return v
 
-    corrected_match = re.search(
-        rf"CORRECTED_{suffix}:\s*(.+?)(?:\n(?:VERDICT_CLINICAL|VERDICT_PATIENT):|$)",
-        text, re.IGNORECASE | re.DOTALL,
-    )
-    corrected_text = corrected_match.group(1).strip() if corrected_match else fallback_summary
+    @model_validator(mode="after")
+    def _fail_needs_a_correction(self):
+        # A FAIL without a rewrite is the old silent bug: it used to be reported as "corrected"
+        # while the text was unchanged. It is invalid, so it triggers the repair step instead.
+        if self.verdict == "FAIL" and not (self.corrected or "").strip():
+            raise ValueError("verdict FAIL requires a non-empty 'corrected' summary")
+        return self
 
+
+class AuditResult(BaseModel):
+    clinical: SideAudit
+    patient: SideAudit
+
+
+class VerifierOutputInvalid(Exception):
+    """The model's audit could not be turned into a valid AuditResult, even after one repair."""
+
+
+def parse_audit(text: str) -> AuditResult:
+    """Strict: JSON (optionally in a code fence) that validates against AuditResult, or raises."""
+    t = (text or "").strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.DOTALL | re.IGNORECASE)
+    if fence:
+        t = fence.group(1)
+    try:
+        return AuditResult.model_validate(json.loads(t))
+    except (json.JSONDecodeError, ValidationError) as e:
+        raise VerifierOutputInvalid(str(e)[:600]) from e
+
+
+def _repair_prompt(bad_output: str, error: str) -> str:
+    return ("Your previous audit output was not valid.\n"
+            f"Problem: {error}\n"
+            f"Previous output:\n{bad_output[:4000]}\n\n"
+            "Re-emit the SAME audit as ONLY a JSON object in the required shape. "
+            "If a verdict is FAIL, \"corrected\" must contain the full corrected summary.")
+
+
+async def _audit(prompt: str) -> AuditResult:
+    """One audit call, plus at most ONE repair call if the output is invalid. Anything still
+    invalid after that raises VerifierOutputInvalid, and the caller fails closed."""
+    text = await generate_text(prompt, system_instruction=VERIFIER_SYSTEM_PROMPT,
+                               label="VERIFIER", json_schema=AuditResult)
+    try:
+        return parse_audit(text)
+    except VerifierOutputInvalid as first:
+        text = await generate_text(_repair_prompt(text, str(first)), system_instruction=VERIFIER_SYSTEM_PROMPT,
+                                   label="VERIFIER/repair", json_schema=AuditResult)
+        return parse_audit(text)
+
+
+def _side_result(side: SideAudit, original: str) -> dict:
+    passed = side.verdict == "PASS"
     return {
         "passed": passed,
         "unverified": False,
-        "issues": issues,
-        "final_summary": fallback_summary if passed else corrected_text,
+        "issues": "none" if not side.issues else "; ".join(side.issues),
+        "final_summary": original if passed else side.corrected.strip(),
         "was_corrected": not passed,
     }
 
@@ -166,17 +231,7 @@ async def verify_and_correct(
     """
     ground_truth = _build_ground_truth(entities, flags, trend_flags, redaction_map, drug_interactions)
 
-    prompt = f"""GROUND TRUTH DATA (the only facts that exist in this patient's report):
-{ground_truth}
-
-CLINICAL SUMMARY TO AUDIT:
-{clinical_summary}
-
-PATIENT SUMMARY TO AUDIT:
-{patient_summary}
-
-Audit BOTH summaries against the ground truth, independently. Does either contain any values,
-conditions, or medications NOT present in the ground truth?"""
+    prompt = _build_audit_prompt(ground_truth, clinical_summary, patient_summary)
 
     # Retry on rate limit. IMPORTANT — fail CLOSED: if the audit cannot run at
     # all (rate-limited past all retries, or any other error), we do NOT
@@ -199,12 +254,16 @@ conditions, or medications NOT present in the ground truth?"""
         }
 
     try:
-        text = await generate_text(prompt, system_instruction=VERIFIER_SYSTEM_PROMPT,
-                                   label="VERIFIER")
+        audit = await _audit(prompt)
         parsed = {
-            "clinical": _parse_side(text, "CLINICAL", clinical_summary),
-            "patient": _parse_side(text, "PATIENT", patient_summary),
+            "clinical": _side_result(audit.clinical, clinical_summary),
+            "patient": _side_result(audit.patient, patient_summary),
         }
+    except VerifierOutputInvalid:
+        parsed = _unverified(
+            "Verification output was malformed even after one repair attempt. "
+            "This summary has NOT been audited — review manually."
+        )
     except Exception as e:  # noqa: BLE001 - every failure fails CLOSED
         if is_rate_limit(e):
             parsed = _unverified(
