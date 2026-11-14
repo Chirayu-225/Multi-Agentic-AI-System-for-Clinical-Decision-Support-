@@ -1,0 +1,1453 @@
+{
+ "_comment": "FROZEN. Do not edit by hand: regenerate with --build, then --update-baseline.",
+ "seed": 7,
+ "cases": [
+  {
+   "id": "frozen-1",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Hypertension"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Pantoprazole"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "Platelets",
+      "value": 265047.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "AST",
+      "value": 23.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "Hb",
+      "value": 16.1,
+      "unit": "g/dL"
+     },
+     {
+      "test": "SGPT",
+      "value": 37.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "PPBS",
+      "value": 107.0,
+      "unit": "mg/dL"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "Platelets",
+     "value": 265047.0,
+     "unit": "cells/mcL",
+     "canonical": "platelets",
+     "normal_range": {
+      "min": 150000,
+      "max": 400000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Platelets: 265047.0 cells/mcL is within normal range (150000\u2013400000 cells/mcL)",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "AST",
+     "value": 23.0,
+     "unit": "U/L",
+     "canonical": "ast",
+     "normal_range": {
+      "min": 10,
+      "max": 35,
+      "unit": "U/L"
+     },
+     "range_basis": "adult female range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "AST: 23.0 U/L is within normal range (10\u201335 U/L)",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Hb",
+     "value": 16.1,
+     "unit": "g/dL",
+     "canonical": "hemoglobin",
+     "normal_range": {
+      "min": 12.0,
+      "max": 15.0,
+      "unit": "g/dL"
+     },
+     "range_basis": "adult female range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Hb: 16.1 g/dL is above normal range (12.0\u201315.0 g/dL) per ICMR NIN 2020. Deviation: 7.3% above maximum.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "SGPT",
+     "value": 37.0,
+     "unit": "U/L",
+     "canonical": "alt",
+     "normal_range": {
+      "min": 7,
+      "max": 35,
+      "unit": "U/L"
+     },
+     "range_basis": "adult female range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "SGPT: 37.0 U/L is above normal range (7\u201335 U/L) per ICMR Hepatology Guidelines. Deviation: 5.7% above maximum.",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "PPBS",
+     "value": 107.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_postprandial",
+     "normal_range": {
+      "min": 70,
+      "max": 140,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "PPBS: 107.0 mg/dL is within normal range (70\u2013140 mg/dL)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    }
+   ],
+   "summary_clean": "Clinical summary: Platelets is 265047 cells/mcL. AST is 23 U/L. Hb is 16.1 g/dL. SGPT is 37 U/L. PPBS is 107 mg/dL.",
+   "summary_novel_value": "Clinical summary: Platelets is 371066.2 cells/mcL. AST is 23 U/L. Hb is 16.1 g/dL. SGPT is 37 U/L. PPBS is 107 mg/dL."
+  },
+  {
+   "id": "frozen-2",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Type 2 diabetes mellitus"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Atorvastatin"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "Glucose Fasting",
+      "value": 109.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Post Prandial Glucose",
+      "value": 116.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Serum Creatinine",
+      "value": 11.34,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "TLC",
+      "value": 6871.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "Serum Potassium",
+      "value": 3.2,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "HbA1c",
+      "value": 6.1,
+      "unit": "%"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "Glucose Fasting",
+     "value": 109.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_fasting",
+     "normal_range": {
+      "min": 70,
+      "max": 100,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Glucose Fasting: 109.0 mg/dL is above normal range (70\u2013100 mg/dL) per ICMR Diabetes Guidelines 2018. Deviation: 9.0% above maximum.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Post Prandial Glucose",
+     "value": 116.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_postprandial",
+     "normal_range": {
+      "min": 70,
+      "max": 140,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Post Prandial Glucose: 116.0 mg/dL is within normal range (70\u2013140 mg/dL)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Serum Creatinine",
+     "value": 11.34,
+     "unit": "mg/dL",
+     "canonical": "creatinine",
+     "normal_range": {
+      "min": 0.5,
+      "max": 1.0,
+      "unit": "mg/dL"
+     },
+     "range_basis": "adult female range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Serum Creatinine: 11.34 mg/dL is CRITICALLY HIGH (critical threshold: 10.0 mg/dL, normal: 0.5\u20131.0 mg/dL). Immediate clinical attention required.",
+     "source": "ICMR Renal Guidelines",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "TLC",
+     "value": 6871.0,
+     "unit": "cells/mcL",
+     "canonical": "wbc",
+     "normal_range": {
+      "min": 4000,
+      "max": 11000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "TLC: 6871.0 cells/mcL is within normal range (4000\u201311000 cells/mcL)",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Serum Potassium",
+     "value": 3.2,
+     "unit": "mEq/L",
+     "canonical": "potassium",
+     "normal_range": {
+      "min": 3.5,
+      "max": 5.0,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "Serum Potassium: 3.2 mEq/L is below normal range (3.5\u20135.0 mEq/L) per ICMR Clinical Biochemistry. Deviation: 8.6% below minimum.",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "HbA1c",
+     "value": 6.1,
+     "unit": "%",
+     "canonical": "hba1c",
+     "normal_range": {
+      "min": 0,
+      "max": 5.7,
+      "unit": "%"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "HbA1c: 6.1 % is above normal range (0\u20135.7 %) per ICMR Diabetes Guidelines 2018. Deviation: 7.0% above maximum.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    }
+   ],
+   "summary_clean": "Clinical summary: Glucose Fasting is 109 mg/dL. Post Prandial Glucose is 116 mg/dL. Serum Creatinine is 11.34 mg/dL. TLC is 6871 cells/mcL. Serum Potassium is 3.2 mEq/L. HbA1c is 6.1 %.",
+   "summary_novel_value": "Clinical summary: Glucose Fasting is 153 mg/dL. Post Prandial Glucose is 116 mg/dL. Serum Creatinine is 11.34 mg/dL. TLC is 6871 cells/mcL. Serum Potassium is 3.2 mEq/L. HbA1c is 6.1 %."
+  },
+  {
+   "id": "frozen-3",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Hypertension"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Metformin"
+     },
+     {
+      "name": "Telmisartan"
+     },
+     {
+      "name": "Pantoprazole"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "Sodium",
+      "value": 139.0,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "ALT",
+      "value": 29.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "TLC",
+      "value": 11676.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "Glucose Fasting",
+      "value": 79.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "HbA1c",
+      "value": 4.7,
+      "unit": "%"
+     },
+     {
+      "test": "Serum Potassium",
+      "value": 5.6,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "SGOT",
+      "value": 1206.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "TSH",
+      "value": 2.82,
+      "unit": "mIU/L"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "Sodium",
+     "value": 139.0,
+     "unit": "mEq/L",
+     "canonical": "sodium",
+     "normal_range": {
+      "min": 135,
+      "max": 145,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Sodium: 139.0 mEq/L is within normal range (135\u2013145 mEq/L)",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "ALT",
+     "value": 29.0,
+     "unit": "U/L",
+     "canonical": "alt",
+     "normal_range": {
+      "min": 7,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "ALT: 29.0 U/L is within normal range (7\u201340 U/L)",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "TLC",
+     "value": 11676.0,
+     "unit": "cells/mcL",
+     "canonical": "wbc",
+     "normal_range": {
+      "min": 4000,
+      "max": 11000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "TLC: 11676.0 cells/mcL is above normal range (4000\u201311000 cells/mcL) per ICMR NIN 2020. Deviation: 6.1% above maximum.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Glucose Fasting",
+     "value": 79.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_fasting",
+     "normal_range": {
+      "min": 70,
+      "max": 100,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Glucose Fasting: 79.0 mg/dL is within normal range (70\u2013100 mg/dL)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "HbA1c",
+     "value": 4.7,
+     "unit": "%",
+     "canonical": "hba1c",
+     "normal_range": {
+      "min": 0,
+      "max": 5.7,
+      "unit": "%"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "HbA1c: 4.7 % is within normal range (0\u20135.7 %)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Serum Potassium",
+     "value": 5.6,
+     "unit": "mEq/L",
+     "canonical": "potassium",
+     "normal_range": {
+      "min": 3.5,
+      "max": 5.0,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Serum Potassium: 5.6 mEq/L is above normal range (3.5\u20135.0 mEq/L) per ICMR Clinical Biochemistry. Deviation: 12.0% above maximum.",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "SGOT",
+     "value": 1206.0,
+     "unit": "U/L",
+     "canonical": "ast",
+     "normal_range": {
+      "min": 10,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "SGOT: 1206.0 U/L is CRITICALLY HIGH (critical threshold: 1000 U/L, normal: 10\u201340 U/L). Immediate clinical attention required.",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "TSH",
+     "value": 2.82,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "TSH: 2.82 mIU/L is within normal range (0.4\u20134.0 mIU/L)",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    }
+   ],
+   "summary_clean": "Clinical summary: Sodium is 139 mEq/L. ALT is 29 U/L. TLC is 11676 cells/mcL. Glucose Fasting is 79 mg/dL. HbA1c is 4.7 %. Serum Potassium is 5.6 mEq/L. SGOT is 1206 U/L. TSH is 2.82 mIU/L.",
+   "summary_novel_value": "Clinical summary: Sodium is 195 mEq/L. ALT is 29 U/L. TLC is 11676 cells/mcL. Glucose Fasting is 79 mg/dL. HbA1c is 4.7 %. Serum Potassium is 5.6 mEq/L. SGOT is 1206 U/L. TSH is 2.82 mIU/L."
+  },
+  {
+   "id": "frozen-4",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Type 2 diabetes mellitus"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Atorvastatin"
+     },
+     {
+      "name": "Amlodipine"
+     },
+     {
+      "name": "Metformin"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "TSH",
+      "value": 3.19,
+      "unit": "mIU/L"
+     },
+     {
+      "test": "Total WBC",
+      "value": 3349.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "Platelets",
+      "value": 324328.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "AST",
+      "value": 9.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "Potassium",
+      "value": 3.2,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "Haemoglobin",
+      "value": 18.6,
+      "unit": "g/dL"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "TSH",
+     "value": 3.19,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "TSH: 3.19 mIU/L is within normal range (0.4\u20134.0 mIU/L)",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Total WBC",
+     "value": 3349.0,
+     "unit": "cells/mcL",
+     "canonical": "wbc",
+     "normal_range": {
+      "min": 4000,
+      "max": 11000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "Total WBC: 3349.0 cells/mcL is below normal range (4000\u201311000 cells/mcL) per ICMR NIN 2020. Deviation: 16.3% below minimum.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Platelets",
+     "value": 324328.0,
+     "unit": "cells/mcL",
+     "canonical": "platelets",
+     "normal_range": {
+      "min": 150000,
+      "max": 400000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Platelets: 324328.0 cells/mcL is within normal range (150000\u2013400000 cells/mcL)",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "AST",
+     "value": 9.0,
+     "unit": "U/L",
+     "canonical": "ast",
+     "normal_range": {
+      "min": 10,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "AST: 9.0 U/L is below normal range (10\u201340 U/L) per ICMR Hepatology Guidelines. Deviation: 10.0% below minimum.",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Potassium",
+     "value": 3.2,
+     "unit": "mEq/L",
+     "canonical": "potassium",
+     "normal_range": {
+      "min": 3.5,
+      "max": 5.0,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "Potassium: 3.2 mEq/L is below normal range (3.5\u20135.0 mEq/L) per ICMR Clinical Biochemistry. Deviation: 8.6% below minimum.",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Haemoglobin",
+     "value": 18.6,
+     "unit": "g/dL",
+     "canonical": "hemoglobin",
+     "normal_range": {
+      "min": 13.0,
+      "max": 17.0,
+      "unit": "g/dL"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Haemoglobin: 18.6 g/dL is above normal range (13.0\u201317.0 g/dL) per ICMR NIN 2020. Deviation: 9.4% above maximum.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    }
+   ],
+   "summary_clean": "Clinical summary: TSH is 3.19 mIU/L. Total WBC is 3349 cells/mcL. Platelets is 324328 cells/mcL. AST is 9 U/L. Potassium is 3.2 mEq/L. Haemoglobin is 18.6 g/dL.",
+   "summary_novel_value": "Clinical summary: TSH is 4.87 mIU/L. Total WBC is 3349 cells/mcL. Platelets is 324328 cells/mcL. AST is 9 U/L. Potassium is 3.2 mEq/L. Haemoglobin is 18.6 g/dL."
+  },
+  {
+   "id": "frozen-5",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Type 2 diabetes mellitus"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Metformin"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "Serum Creatinine",
+      "value": 1.41,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "PPBS",
+      "value": 671.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Serum Potassium",
+      "value": 5.8,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "TSH",
+      "value": 0.37,
+      "unit": "mIU/L"
+     },
+     {
+      "test": "Platelets",
+      "value": 342020.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "HbA1c",
+      "value": 4.0,
+      "unit": "%"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "Serum Creatinine",
+     "value": 1.41,
+     "unit": "mg/dL",
+     "canonical": "creatinine",
+     "normal_range": {
+      "min": 0.7,
+      "max": 1.2,
+      "unit": "mg/dL"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Serum Creatinine: 1.41 mg/dL is above normal range (0.7\u20131.2 mg/dL) per ICMR Renal Guidelines. Deviation: 17.5% above maximum.",
+     "source": "ICMR Renal Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "PPBS",
+     "value": 671.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_postprandial",
+     "normal_range": {
+      "min": 70,
+      "max": 140,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "PPBS: 671.0 mg/dL is CRITICALLY HIGH (critical threshold: 600 mg/dL, normal: 70\u2013140 mg/dL). Immediate clinical attention required.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "Serum Potassium",
+     "value": 5.8,
+     "unit": "mEq/L",
+     "canonical": "potassium",
+     "normal_range": {
+      "min": 3.5,
+      "max": 5.0,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Serum Potassium: 5.8 mEq/L is above normal range (3.5\u20135.0 mEq/L) per ICMR Clinical Biochemistry. Deviation: 16.0% above maximum.",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "TSH",
+     "value": 0.37,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "TSH: 0.37 mIU/L is below normal range (0.4\u20134.0 mIU/L) per ICMR Endocrinology Guidelines. Deviation: 7.5% below minimum.",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Platelets",
+     "value": 342020.0,
+     "unit": "cells/mcL",
+     "canonical": "platelets",
+     "normal_range": {
+      "min": 150000,
+      "max": 400000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Platelets: 342020.0 cells/mcL is within normal range (150000\u2013400000 cells/mcL)",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "HbA1c",
+     "value": 4.0,
+     "unit": "%",
+     "canonical": "hba1c",
+     "normal_range": {
+      "min": 0,
+      "max": 5.7,
+      "unit": "%"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "HbA1c: 4.0 % is within normal range (0\u20135.7 %)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    }
+   ],
+   "summary_clean": "Clinical summary: Serum Creatinine is 1.41 mg/dL. PPBS is 671 mg/dL. Serum Potassium is 5.8 mEq/L. TSH is 0.37 mIU/L. Platelets is 342020 cells/mcL. HbA1c is 4 %.",
+   "summary_novel_value": "Clinical summary: Serum Creatinine is 2.37 mg/dL. PPBS is 671 mg/dL. Serum Potassium is 5.8 mEq/L. TSH is 0.37 mIU/L. Platelets is 342020 cells/mcL. HbA1c is 4 %."
+  },
+  {
+   "id": "frozen-6",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Hypothyroidism"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Metformin"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "WBC",
+      "value": 12090.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "Post Prandial Glucose",
+      "value": 38.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "HbA1c",
+      "value": 6.4,
+      "unit": "%"
+     },
+     {
+      "test": "SGPT",
+      "value": 46.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "TSH",
+      "value": 0.33,
+      "unit": "mIU/L"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "WBC",
+     "value": 12090.0,
+     "unit": "cells/mcL",
+     "canonical": "wbc",
+     "normal_range": {
+      "min": 4000,
+      "max": 11000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "WBC: 12090.0 cells/mcL is above normal range (4000\u201311000 cells/mcL) per ICMR NIN 2020. Deviation: 9.9% above maximum.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Post Prandial Glucose",
+     "value": 38.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_postprandial",
+     "normal_range": {
+      "min": 70,
+      "max": 140,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "Post Prandial Glucose: 38.0 mg/dL is CRITICALLY LOW (critical threshold: 50 mg/dL, normal: 70\u2013140 mg/dL). Immediate clinical attention required.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "HbA1c",
+     "value": 6.4,
+     "unit": "%",
+     "canonical": "hba1c",
+     "normal_range": {
+      "min": 0,
+      "max": 5.7,
+      "unit": "%"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "HbA1c: 6.4 % is above normal range (0\u20135.7 %) per ICMR Diabetes Guidelines 2018. Deviation: 12.3% above maximum.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "SGPT",
+     "value": 46.0,
+     "unit": "U/L",
+     "canonical": "alt",
+     "normal_range": {
+      "min": 7,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "SGPT: 46.0 U/L is above normal range (7\u201340 U/L) per ICMR Hepatology Guidelines. Deviation: 15.0% above maximum.",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "TSH",
+     "value": 0.33,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "TSH: 0.33 mIU/L is below normal range (0.4\u20134.0 mIU/L) per ICMR Endocrinology Guidelines. Deviation: 17.5% below minimum.",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    }
+   ],
+   "summary_clean": "Clinical summary: WBC is 12090 cells/mcL. Post Prandial Glucose is 38 mg/dL. HbA1c is 6.4 %. SGPT is 46 U/L. TSH is 0.33 mIU/L.",
+   "summary_novel_value": "Clinical summary: WBC is 16926.4 cells/mcL. Post Prandial Glucose is 38 mg/dL. HbA1c is 6.4 %. SGPT is 46 U/L. TSH is 0.33 mIU/L."
+  },
+  {
+   "id": "frozen-7",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Iron deficiency anaemia"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Metformin"
+     },
+     {
+      "name": "Atorvastatin"
+     },
+     {
+      "name": "Amlodipine"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "ALT",
+      "value": 28.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "PPBS",
+      "value": 93.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Potassium",
+      "value": 2.9,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "FBS",
+      "value": 78.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Serum Sodium",
+      "value": 143.0,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "Hemoglobin",
+      "value": 21.7,
+      "unit": "g/dL"
+     },
+     {
+      "test": "TSH",
+      "value": 0.35,
+      "unit": "mIU/L"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "ALT",
+     "value": 28.0,
+     "unit": "U/L",
+     "canonical": "alt",
+     "normal_range": {
+      "min": 7,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "ALT: 28.0 U/L is within normal range (7\u201340 U/L)",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "PPBS",
+     "value": 93.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_postprandial",
+     "normal_range": {
+      "min": 70,
+      "max": 140,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "PPBS: 93.0 mg/dL is within normal range (70\u2013140 mg/dL)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Potassium",
+     "value": 2.9,
+     "unit": "mEq/L",
+     "canonical": "potassium",
+     "normal_range": {
+      "min": 3.5,
+      "max": 5.0,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "Potassium: 2.9 mEq/L is below normal range (3.5\u20135.0 mEq/L) per ICMR Clinical Biochemistry. Deviation: 17.1% below minimum.",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "FBS",
+     "value": 78.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_fasting",
+     "normal_range": {
+      "min": 70,
+      "max": 100,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "FBS: 78.0 mg/dL is within normal range (70\u2013100 mg/dL)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Serum Sodium",
+     "value": 143.0,
+     "unit": "mEq/L",
+     "canonical": "sodium",
+     "normal_range": {
+      "min": 135,
+      "max": 145,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Serum Sodium: 143.0 mEq/L is within normal range (135\u2013145 mEq/L)",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Hemoglobin",
+     "value": 21.7,
+     "unit": "g/dL",
+     "canonical": "hemoglobin",
+     "normal_range": {
+      "min": 13.0,
+      "max": 17.0,
+      "unit": "g/dL"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Hemoglobin: 21.7 g/dL is CRITICALLY HIGH (critical threshold: 20.0 g/dL, normal: 13.0\u201317.0 g/dL). Immediate clinical attention required.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "TSH",
+     "value": 0.35,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "TSH: 0.35 mIU/L is below normal range (0.4\u20134.0 mIU/L) per ICMR Endocrinology Guidelines. Deviation: 12.5% below minimum.",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    }
+   ],
+   "summary_clean": "Clinical summary: ALT is 28 U/L. PPBS is 93 mg/dL. Potassium is 2.9 mEq/L. FBS is 78 mg/dL. Serum Sodium is 143 mEq/L. Hemoglobin is 21.7 g/dL. TSH is 0.35 mIU/L.",
+   "summary_novel_value": "Clinical summary: ALT is 39.6 U/L. PPBS is 93 mg/dL. Potassium is 2.9 mEq/L. FBS is 78 mg/dL. Serum Sodium is 143 mEq/L. Hemoglobin is 21.7 g/dL. TSH is 0.35 mIU/L."
+  },
+  {
+   "id": "frozen-8",
+   "entities": {
+    "patient": {},
+    "clinical": {
+     "diagnoses": [
+      "Type 2 diabetes mellitus"
+     ]
+    },
+    "medications": [
+     {
+      "name": "Metformin"
+     },
+     {
+      "name": "Amlodipine"
+     }
+    ],
+    "lab_values": [
+     {
+      "test": "Glucose Fasting",
+      "value": 114.0,
+      "unit": "mg/dL"
+     },
+     {
+      "test": "Serum Sodium",
+      "value": 142.0,
+      "unit": "mEq/L"
+     },
+     {
+      "test": "Total WBC",
+      "value": 35307.0,
+      "unit": "cells/mcL"
+     },
+     {
+      "test": "TSH",
+      "value": 0.01,
+      "unit": "mIU/L"
+     },
+     {
+      "test": "HbA1c",
+      "value": 4.6,
+      "unit": "%"
+     },
+     {
+      "test": "AST",
+      "value": 43.0,
+      "unit": "U/L"
+     },
+     {
+      "test": "SGPT",
+      "value": 29.0,
+      "unit": "U/L"
+     }
+    ]
+   },
+   "flags": [
+    {
+     "test": "Glucose Fasting",
+     "value": 114.0,
+     "unit": "mg/dL",
+     "canonical": "glucose_fasting",
+     "normal_range": {
+      "min": 70,
+      "max": 100,
+      "unit": "mg/dL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Glucose Fasting: 114.0 mg/dL is above normal range (70\u2013100 mg/dL) per ICMR Diabetes Guidelines 2018. Deviation: 14.0% above maximum.",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "Serum Sodium",
+     "value": 142.0,
+     "unit": "mEq/L",
+     "canonical": "sodium",
+     "normal_range": {
+      "min": 135,
+      "max": 145,
+      "unit": "mEq/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "Serum Sodium: 142.0 mEq/L is within normal range (135\u2013145 mEq/L)",
+     "source": "ICMR Clinical Biochemistry",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "Total WBC",
+     "value": 35307.0,
+     "unit": "cells/mcL",
+     "canonical": "wbc",
+     "normal_range": {
+      "min": 4000,
+      "max": 11000,
+      "unit": "cells/mcL"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "Total WBC: 35307.0 cells/mcL is CRITICALLY HIGH (critical threshold: 30000 cells/mcL, normal: 4000\u201311000 cells/mcL). Immediate clinical attention required.",
+     "source": "ICMR NIN 2020",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "TSH",
+     "value": 0.01,
+     "unit": "mIU/L",
+     "canonical": "tsh",
+     "normal_range": {
+      "min": 0.4,
+      "max": 4.0,
+      "unit": "mIU/L"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "low",
+     "message": "TSH: 0.01 mIU/L is CRITICALLY LOW (critical threshold: 0.01 mIU/L, normal: 0.4\u20134.0 mIU/L). Immediate clinical attention required.",
+     "source": "ICMR Endocrinology Guidelines",
+     "flag_type": "population_range",
+     "severity": "CRITICAL"
+    },
+    {
+     "test": "HbA1c",
+     "value": 4.6,
+     "unit": "%",
+     "canonical": "hba1c",
+     "normal_range": {
+      "min": 0,
+      "max": 5.7,
+      "unit": "%"
+     },
+     "range_basis": "standard range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "HbA1c: 4.6 % is within normal range (0\u20135.7 %)",
+     "source": "ICMR Diabetes Guidelines 2018",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    },
+    {
+     "test": "AST",
+     "value": 43.0,
+     "unit": "U/L",
+     "canonical": "ast",
+     "normal_range": {
+      "min": 10,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "high",
+     "message": "AST: 43.0 U/L is above normal range (10\u201340 U/L) per ICMR Hepatology Guidelines. Deviation: 7.5% above maximum.",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "MODERATE"
+    },
+    {
+     "test": "SGPT",
+     "value": 29.0,
+     "unit": "U/L",
+     "canonical": "alt",
+     "normal_range": {
+      "min": 7,
+      "max": 40,
+      "unit": "U/L"
+     },
+     "range_basis": "adult male range",
+     "lab_range": null,
+     "lab_direction": null,
+     "range_discordant": false,
+     "direction": "normal",
+     "message": "SGPT: 29.0 U/L is within normal range (7\u201340 U/L)",
+     "source": "ICMR Hepatology Guidelines",
+     "flag_type": "population_range",
+     "severity": "NORMAL"
+    }
+   ],
+   "summary_clean": "Clinical summary: Glucose Fasting is 114 mg/dL. Serum Sodium is 142 mEq/L. Total WBC is 35307 cells/mcL. TSH is 0.01 mIU/L. HbA1c is 4.6 %. AST is 43 U/L. SGPT is 29 U/L.",
+   "summary_novel_value": "Clinical summary: Glucose Fasting is 160 mg/dL. Serum Sodium is 142 mEq/L. Total WBC is 35307 cells/mcL. TSH is 0.01 mIU/L. HbA1c is 4.6 %. AST is 43 U/L. SGPT is 29 U/L."
+  }
+ ]
+}

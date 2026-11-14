@@ -70,10 +70,15 @@ def fresh_state(monkeypatch):
         return {"raw_text": RAW_TEXT, "source_type": "digital", "has_hindi": False, "pages": 1,
                 "filename": "x", "ocr_confidence": None}
 
-    async def fake_orchestrator(report_text, patient_id, report_date="", on_step=None):
+    async def fake_orchestrator(report_text, patient_id, report_date="", on_step=None, on_preliminary=None):
         from src.tools import tool_registry
         from src.tools.drug_interactions import check_drug_interactions
         flags = (await tool_registry.check_icmr_flags(ENTITIES["lab_values"], "Female"))["flags"]
+        if on_preliminary is not None:      # the real orchestrator calls this before any model call
+            await on_preliminary({"entities": ENTITIES, "rule_flags": flags, "trend_flags": [],
+                                  "baseline_flags": [], "ingestion_warnings": [],
+                                  "drug_interactions": check_drug_interactions(ENTITIES["medications"], flags),
+                                  "risk_summary": {"overall_severity": "HIGH"}})
         return {
             "entities": ENTITIES, "rule_flags": flags, "trend_flags": [], "baseline_flags": [],
             "forecast_flags": [], "similar_history": [],

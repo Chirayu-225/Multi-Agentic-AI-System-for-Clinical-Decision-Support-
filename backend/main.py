@@ -47,12 +47,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.session import get_db, create_tables, SessionLocal
-from src.db.models import Patient, Report, AgentRun, User, AuditEvent
+from src.db.models import Patient, Report, AgentRun, LlmCall, User, AuditEvent
 from src.ingestion.document_loader import (
     load_document, ALLOWED_EXTS, PDF_EXTS, sniff_file_type, extension_matches_content,
 )
 from src.agents.orchestrator import run_orchestrator
-from src.llm import begin_model_tracking
+from src import ai_quality, outbox, prompts
+from src.llm import begin_call_tracking, begin_model_tracking, llm_unavailable_for
 from src.agents.summarizer import generate_summaries
 from src.agents.verifier import verify_and_correct
 from src.agents.translator import (LANGUAGES, is_supported, translate_patient_summary)
@@ -174,6 +175,7 @@ async def startup():
     create_tables()
     _bootstrap_users()
     await _start_job_worker()
+    await _start_outbox_relay()
 
 
 @app.on_event("shutdown")
@@ -181,6 +183,8 @@ async def shutdown():
     # Running jobs are handed back to the queue (not lost, not counted as an attempt).
     if _worker is not None:
         await _worker.stop()
+    if _relay is not None:
+        await _relay.stop()
 
 
 def _bootstrap_users():
@@ -237,14 +241,17 @@ def ready(db: Session = Depends(get_db)):
         db.execute(text("SELECT 1"))
         checks["database"] = "ok"
         queue = jobq.depth_by_status(db)
+        history_outbox = outbox.depth_by_status(db)
     except Exception:  # noqa: BLE001
         checks["database"] = "down"
+        history_outbox = None
+    checks["outbox_relay"] = "ok" if (_relay is not None and _relay.alive) else "down"
     if _env_num("JOB_WORKERS", 2, int) <= 0:
         checks["worker"] = "disabled"
     else:
         checks["worker"] = "ok" if (_worker is not None and _worker.alive) else "down"
     ok = all(v in ("ok", "disabled") for v in checks.values())
-    return JSONResponse({"status": "ready" if ok else "not_ready", **checks, "queue": queue},
+    return JSONResponse({"status": "ready" if ok else "not_ready", **checks, "queue": queue, "outbox": history_outbox},
                         status_code=200 if ok else 503)
 
 
@@ -614,6 +621,106 @@ def _job_finished(job: jobq.JobSnapshot, status: str, error: str | None) -> None
         logger.warning("could not delete spool file for job %s", job.id)
 
 
+# ── History-store outbox ───────────────────────────────────────────────────────
+# The ChromaDB write cannot share the report's database transaction, so it is recorded as an
+# outbox event in that transaction and applied afterwards with retries (src/outbox.py).
+
+_relay: "outbox.OutboxRelay | None" = None
+HISTORY_PENDING = "History update pending: "
+
+
+def _outbox_config() -> dict:
+    return {
+        "lease_seconds": _env_num("OUTBOX_LEASE_SECONDS", 120.0),
+        "max_attempts": _env_num("OUTBOX_MAX_ATTEMPTS", 8, int),
+        "base_seconds": _env_num("OUTBOX_RETRY_BASE_SECONDS", 30.0),
+        "poll_seconds": _env_num("OUTBOX_POLL_SECONDS", 5.0),
+        "retention_hours": _env_num("OUTBOX_RETENTION_HOURS", 24.0),
+    }
+
+
+def _history_text(redacted_text: str, words: int = 512) -> str:
+    return " ".join(redacted_text.split()[:words])      # what the vector store embeds, and no more
+
+
+def _apply_history_event(ev: dict) -> str | None:
+    """Idempotent: chroma_store upserts by report id. Skips reports that were rejected or erased
+    while the event waited, and undoes its own write if that happened while it was writing."""
+    def _state():
+        db = SessionLocal()
+        try:
+            r = db.query(Report.review_status).filter(Report.id == ev["report_id"]).first()
+            patient_exists = db.query(Patient.id).filter(Patient.id == ev["patient_id"]).first() is not None
+            return r, patient_exists
+        finally:
+            db.close()
+
+    def _undo():
+        r, patient_exists = _state()
+        if r is not None and r.review_status != "rejected":
+            return
+        try:
+            if patient_exists:
+                delete_report_history(ev["patient_id"], ev["report_id"])
+            else:
+                delete_patient_history(ev["patient_id"])
+        except Exception:  # noqa: BLE001
+            logger.exception("could not undo a history write for a rejected/erased report")
+
+    r, _ = _state()
+    if r is None or r.review_status == "rejected":
+        return "skipped"
+    p = ev["payload"]
+    chroma_store(patient_id=ev["patient_id"], report_text=p.get("text", ""),
+                 lab_values=p.get("lab_values", []), report_date=p.get("report_date", ""),
+                 report_id=ev["report_id"])
+    _undo()      # a rejection or erasure that landed during the write must still win
+    return None
+
+
+def _outbox_result(ev: dict, outcome: str, error: str | None) -> None:
+    """Keep the report's warning list honest about whether it is in the patient's history."""
+    if ev["kind"] != outbox.HISTORY_INDEX:
+        return
+    db = SessionLocal()
+    try:
+        r = db.query(Report).filter(Report.id == ev["report_id"]).first()
+        if r is None:
+            return
+        keep = [w for w in (r.ingestion_warnings or [])
+                if not w.startswith(HISTORY_PENDING) and "could not be added to the patient's history" not in w]
+        if outcome == "retry":
+            keep.append(f"{HISTORY_PENDING}this report is not in the patient's history yet ({error}); it will be "
+                        f"retried automatically. Until then trend and baseline checks do not include it.")
+        elif outcome == "dead":
+            keep.append(f"This report could not be added to the patient's history after repeated attempts ({error}), "
+                        f"so it will not appear in future trend or baseline checks.")
+        if keep != list(r.ingestion_warnings or []):
+            r.ingestion_warnings = keep
+            db.commit()
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        db.rollback()
+        logger.exception("could not update history-status warning")
+    finally:
+        db.close()
+
+
+async def _start_outbox_relay() -> None:
+    global _relay
+    _relay = outbox.OutboxRelay(session_factory=SessionLocal, handler=_apply_history_event,
+                                config=_outbox_config, on_result=_outbox_result)
+    await _relay.start()
+
+    def _depth() -> dict:
+        db = SessionLocal()
+        try:
+            return outbox.depth_by_status(db)
+        finally:
+            db.close()
+
+    obs.gauge("outbox_events", "History-store outbox events by status (database-wide).", _depth)
+
+
 async def _start_job_worker() -> None:
     global _worker
     workers = _env_num("JOB_WORKERS", 2, int)
@@ -693,6 +800,7 @@ def _report_full(r: Report, db: Session) -> dict:
     return {
         "report_id": r.id, "patient_id": r.patient_id, "filename": r.filename,
         "report_date": r.report_date, "source_type": r.source_type,
+        "analysis_status": r.analysis_status or "complete", "has_critical": bool(r.has_critical),
         "has_hindi": str(r.has_hindi).lower() == "true", "pages": r.pages,
         "entities": r.entities or {}, "rule_flags": r.rule_flags or [],
         "trend_flags": r.trend_flags or [], "baseline_flags": r.baseline_flags or [],
@@ -881,6 +989,91 @@ async def upload_report(
     )
 
 
+def _call_cost_usd(tokens_in: int, tokens_out: int) -> float:
+    """NOTIONAL cost: what these tokens would cost at paid-tier prices. On the free tier the real
+    spend is zero; the number exists so a prompt change can be judged by what it would cost at
+    scale. Prices are per million tokens and configurable (LLM_PRICE_INPUT_PER_M / _OUTPUT_PER_M)."""
+    return round((tokens_in * _env_num("LLM_PRICE_INPUT_PER_M", 0.30)
+                  + tokens_out * _env_num("LLM_PRICE_OUTPUT_PER_M", 2.50)) / 1_000_000, 8)
+
+
+def _persist_llm_calls(report_id: str, calls: list[dict]) -> None:
+    """Write the model-call trace. Best effort: tracing must never fail an upload."""
+    if not calls:
+        return
+    db = SessionLocal()
+    try:
+        db.add_all([LlmCall(
+            report_id=report_id, purpose=c["purpose"], model=c["model"],
+            prompt_version=prompts.version_of(c["purpose"]), attempt=c["attempt"], status=c["status"],
+            error_class=c["error_class"], latency_ms=c["latency_ms"], input_tokens=c["input_tokens"],
+            output_tokens=c["output_tokens"], cost_usd=_call_cost_usd(c["input_tokens"], c["output_tokens"]),
+        ) for c in list(calls)])
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("could not record the model-call trace for %s", report_id)
+    finally:
+        db.close()
+
+
+def _flag_severity(f: dict) -> str:
+    return str(f.get("severity", "")).replace("Severity.", "").upper()
+
+
+def _save_preliminary(report_id: str, patient_id: str, filename: str | None, report_date: str,
+                      source_type: str, pages: int, uploaded_by: str, data: dict) -> bool:
+    """Write the deterministic results as a 'preliminary' report. Runs before any model call, so a
+    critical value is on a clinician's screen within seconds of the upload and stays there if the
+    model provider is down. Idempotent: returns False if a row already exists (a retry)."""
+    db = SessionLocal()
+    try:
+        if db.query(Report.id).filter(Report.id == report_id).first():
+            return False
+        if not db.query(Patient.id).filter(Patient.id == patient_id).first():
+            db.add(Patient(id=patient_id))
+        flags = data.get("rule_flags", [])
+        entities = data.get("entities", {})
+        db.add(Report(
+            id=report_id, patient_id=patient_id, filename=filename, report_date=report_date,
+            source_type=source_type, pages=pages, entities=entities, rule_flags=flags,
+            trend_flags=data.get("trend_flags", []), baseline_flags=data.get("baseline_flags", []),
+            risk_summary=data.get("risk_summary", {}), lab_values=entities.get("lab_values", []),
+            ingestion_warnings=list(data.get("ingestion_warnings", [])) + [
+                "PRELIMINARY: lab flags and drug interactions only. The summaries have not been "
+                "generated yet and this report cannot be approved until they are."],
+            security_warnings=[], drug_interactions=data.get("drug_interactions", {}) or {},
+            # Never released to a patient from here, whatever REQUIRE_CLINICIAN_REVIEW says.
+            review_status="pending_review", analysis_status="preliminary",
+            has_critical=any(_flag_severity(f) == "CRITICAL" for f in flags),
+            uploaded_by=uploaded_by,
+        ))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return False
+        obs.inc("reports_preliminary_total")
+        return True
+    finally:
+        db.close()
+
+
+def _defer_if_ai_down(job: jobq.JobSnapshot, report_id: str) -> None:
+    """If the model provider is considered down, wait for it instead of producing a report with
+    no summaries. The preliminary report is already visible meanwhile. After JOB_DEFER_MAX_SECONDS
+    we stop waiting and finish with the degraded (clearly labelled) output rather than never."""
+    wait = llm_unavailable_for()
+    if wait <= 0:
+        return
+    limit = _env_num("JOB_DEFER_MAX_SECONDS", 3600.0)
+    age = (jobq.utcnow() - job.created_at).total_seconds() if job.created_at else 0.0
+    if age >= limit:
+        logger.warning("AI service still unavailable after %.0fs; finishing %s without waiting", age, report_id)
+        return
+    raise jobq.DeferJob(min(max(wait, 5.0), 300.0) + secrets.randbelow(5), "AI service unavailable")
+
+
 async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
     """The analysis pipeline for one queued upload, run by a JobWorker with its own DB session.
 
@@ -894,11 +1087,13 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
     principal = Principal(subject=job.owner, role=ROLE_CLINICIAN, patient_id=None)
     started = time.monotonic()
     models_used = begin_model_tracking()   # every model that answers during this upload
+    llm_trace = begin_call_tracking(max_calls=_env_num("LLM_MAX_CALLS_PER_REPORT", 12, int))
     caller_fp = fingerprint(principal.subject)
     ws_callback = _make_job_callback(report_id, report_progress)
     db = SessionLocal()
     try:
-        if db.query(Report.id).filter(Report.id == report_id).first():
+        existing = db.query(Report.id, Report.analysis_status).filter(Report.id == report_id).first()
+        if existing and (existing.analysis_status or "complete") != "preliminary":
             logger.info("report already saved by an earlier attempt; nothing to redo")
             return
 
@@ -931,6 +1126,9 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
             patient_id=patient_id,
             report_date=clean_date,
             on_step=ws_callback,
+            on_preliminary=lambda snap: asyncio.to_thread(
+                _save_preliminary, report_id, patient_id, filename, clean_date,
+                doc["source_type"], doc["pages"], principal.subject, snap),
         )
 
         # Pop the redaction map out immediately — it exists only to keep
@@ -967,6 +1165,9 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
         security_warnings = list(agent_data.get("security_warnings", [])) + security_extra
         llm_calls = int(agent_data.get("llm_calls", 0))
 
+        # Provider down: keep the preliminary report, wait, and do the model steps later.
+        _defer_if_ai_down(job, report_id)
+
         # ── Step 3: Generate summaries ─────────────────────────────────────
         # NOTE: summaries returned here still contain redaction placeholders
         # (e.g. "[REDACTED_NAME_1]") in place of the patient's real name —
@@ -994,6 +1195,9 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
         ws_callback({"type": "verifier_complete",
                      "clinical_corrected": verified["clinical_corrected"],
                      "patient_corrected": verified["patient_corrected"]})
+
+        # The provider may have failed during the steps above (they degrade instead of raising).
+        _defer_if_ai_down(job, report_id)
 
         # ── Step 4b: deterministic numeric-grounding check ─────────────────
         # Independent of the (LLM) Verifier: every number in a summary must exist
@@ -1087,8 +1291,20 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
             "clinical_issues": verified.get("clinical_issues", ""),
             "patient_issues": verified.get("patient_issues", ""),
         }
+        # The preliminary row (saved earlier in this attempt or in a deferred one) is replaced in
+        # place: same id, original timestamp.
+        prelim = db.query(Report.created_at).filter(
+            Report.id == report_id, Report.analysis_status == "preliminary").first()
+        prelim_created_at = prelim.created_at if prelim else None
+        if prelim:
+            db.query(Report).filter(Report.id == report_id, Report.analysis_status == "preliminary").delete(
+                synchronize_session=False)
+            db.flush()
         report = Report(
-            id=report_id, patient_id=patient_id, filename=filename, report_date=clean_date,
+            id=report_id, created_at=prelim_created_at or datetime.utcnow(),
+            analysis_status="complete",
+            has_critical=any(_flag_severity(f) == "CRITICAL" for f in rule_flags),
+            patient_id=patient_id, filename=filename, report_date=clean_date,
             source_type=doc["source_type"], has_hindi=str(doc["has_hindi"]), pages=doc["pages"],
             entities=entities, rule_flags=rule_flags, trend_flags=trend_flags,
             baseline_flags=baseline_flags, forecast_flags=forecast_flags,
@@ -1110,6 +1326,11 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
                                if translation and translation.get("text") else None),
         )
         db.add(report)
+        db.flush()  # agent_runs.report_id is a FK; no ORM relationship orders the inserts
+        outbox.add(db, kind=outbox.HISTORY_INDEX, report_id=report_id, patient_id=patient_id, payload={
+            # Redacted text only: names, phone numbers, MRNs etc. never reach the vector store.
+            "text": _history_text(redact(raw_text, redaction_map)), "lab_values": lab_values,
+            "report_date": clean_date})
         db.add(AgentRun(
             report_id=report_id, agent_name="orchestrator+summarizer+verifier",
             tool_calls=agent_data.get("tool_calls_log", []),
@@ -1118,6 +1339,9 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
             duration_ms=int((time.monotonic() - started) * 1000), llm_calls=llm_calls,
             # e.g. "gemini-3.8-flash" or, if the fallback answered any call, both models
             model=",".join(sorted(models_used)) or (agent_data.get("token_usage") or {}).get("model"),
+            input_tokens=sum(c["input_tokens"] for c in llm_trace),
+            output_tokens=sum(c["output_tokens"] for c in llm_trace),
+            prompt_versions={k: f"{k}@{v}" for k, v in prompts.current_versions().items()},
         ))
         try:
             db.commit()
@@ -1129,24 +1353,15 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
                 return
             raise
 
-        # ── Step 6: Store in ChromaDB for longitudinal tracking ─────────────
-        # Redacted copy only: names, phone numbers, MRNs etc. never reach the vector store.
-        # The report is already saved above, so a failure here must not become a 500 — the
-        # clinician would re-upload and create a duplicate. Record it on the report instead.
-        try:
-            # Embedding + vector write are blocking; keep them off the event loop.
-            await asyncio.to_thread(
-                chroma_store,
-                patient_id=patient_id, report_text=redact(raw_text, redaction_map), lab_values=lab_values,
-                report_date=clean_date, report_id=report_id,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("History store write failed report_id=%s", report_id)
-            report.ingestion_warnings = list(report.ingestion_warnings or []) + [
-                f"This report could not be added to the patient's history ({type(e).__name__}), "
-                f"so it will not appear in future trend or baseline checks."
-            ]
-            db.commit()
+        # ── Step 6: apply the history-store write staged in the outbox ──────
+        # Best effort right now; if it fails the event stays in the outbox and the relay retries it
+        # (a failure here must never become a 500: the report is saved and a re-upload would
+        # duplicate it). _outbox_result records the outcome on the report.
+        cfg = _outbox_config()
+        await asyncio.to_thread(
+            outbox.drain, SessionLocal, _apply_history_event, lease_seconds=cfg["lease_seconds"],
+            max_attempts=cfg["max_attempts"], base_seconds=cfg["base_seconds"], report_id=report_id,
+            on_result=_outbox_result)
 
         audit.record(actor=principal.subject, role=principal.role, action="report.upload",
                      resource=f"report:{report_id}", ip=ip,
@@ -1155,6 +1370,7 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
                              "review_status": report.review_status})
         obs.inc("reports_analysed_total")
     finally:
+        _persist_llm_calls(report_id, llm_trace)    # also on failure, deferral and cancellation
         db.close()
 
 
@@ -1214,6 +1430,12 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
 
     previous = _effective_status(r)
     new_status = "approved" if body.decision == "approve" else "rejected"
+    if new_status == "approved" and (r.analysis_status or "complete") != "complete":
+        raise HTTPException(409, detail={
+            "message": "This report is preliminary: the AI summaries are still being generated. "
+                       "Lab flags are shown for early review, but it cannot be approved until the analysis completes.",
+            "analysis_status": r.analysis_status,
+        })
     if new_status not in _ALLOWED_REVIEW_TRANSITIONS.get(previous, set()):
         raise HTTPException(409, detail={
             "message": f"A report that is '{previous}' cannot be {new_status}. "
@@ -1242,6 +1464,7 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
                          "warnings": len(warnings), "edited": sorted(edits)})
     if new_status == "rejected":
         # A rejected report must not keep shaping this patient's trends and baselines.
+        outbox.cancel_for_report(db, report_id)      # a history write still waiting must not happen
         try:
             delete_report_history(r.patient_id, report_id)
         except Exception:
@@ -1257,6 +1480,11 @@ def review_report(report_id: str, body: ReviewIn, request: Request, db: Session 
             r.translation_language = None
             r.translation_check = None
     r.review_edited = bool(edits) if body.decision == "approve" else None
+    if edits:
+        # The feedback signal: how much did the clinician change? (r.ai_* hold the model's originals.)
+        r.edit_ratio, r.edit_words_changed = ai_quality.edit_stats([
+            (r.ai_clinical_summary if f == "clinical_summary" else r.ai_patient_summary, getattr(r, f))
+            for f in edits])
     r.warnings_acknowledged = bool(warnings) and body.decision == "approve"
     r.review_status = new_status
     r.reviewed_by = principal.subject
@@ -1273,7 +1501,9 @@ def pending_reviews(db: Session = Depends(get_db),
     rows = (db.query(Report)
             .filter((Report.review_status == "pending_review") | (Report.review_status.is_(None)))
             .order_by(Report.created_at.desc()).limit(200).all())
+    rows.sort(key=lambda r: not r.has_critical)   # critical results first; stable, so newest-first within
     return {"count": len(rows), "reports": [{
+        "analysis_status": r.analysis_status or "complete", "has_critical": bool(r.has_critical),
         "report_id": r.id, "patient_id": r.patient_id, "filename": r.filename,
         "report_date": r.report_date, "created_at": _iso(r.created_at),
         "overall_severity": (r.risk_summary or {}).get("overall_severity"),
@@ -1477,6 +1707,13 @@ def delete_patient(patient_id: str, request: Request, db: Session = Depends(get_
     audit.record(actor=principal.subject, role=principal.role, action="patient.delete",
                  resource=f"patient:{patient_id}", ip=_ip(request), critical=True,
                  detail={"reports_deleted": n_reports, "history_store_cleared": vectors_cleared})
+    # agent_runs reference reports by foreign key: they must go first or PostgreSQL refuses the
+    # delete (SQLite does not enforce the key, which is how this went unnoticed).
+    report_ids = [r.id for r in patient.reports]
+    if report_ids:
+        db.query(AgentRun).filter(AgentRun.report_id.in_(report_ids)).delete(synchronize_session=False)
+        db.query(LlmCall).filter(LlmCall.report_id.in_(report_ids)).delete(synchronize_session=False)
+    outbox.delete_for_patient(db, patient_id)
     db.delete(patient)
     db.commit()
     logger.warning("Patient record deleted: patient_id=%s by=%s", patient_id, principal.subject)
@@ -1484,6 +1721,79 @@ def delete_patient(patient_id: str, request: Request, db: Session = Depends(get_
 
 
 # ── Operations: metrics + audit ────────────────────────────────────────────────
+
+def _percentile(values: list[float], pct: float) -> int | None:
+    if not values:
+        return None
+    s = sorted(values)
+    return int(s[min(len(s) - 1, int(round(pct * (len(s) - 1))))])
+
+
+@app.get("/admin/ai-quality")
+def ai_quality_report(days: int = Query(30, ge=1, le=365), db: Session = Depends(get_db),
+                      principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """What clinicians did with the AI's summaries (approved as is / edited / rejected), per prompt
+    version and model. Aggregates only: no summary text, no patient identifiers."""
+    since = datetime.utcnow() - timedelta(days=days)
+    reports = (db.query(Report).filter(Report.review_status.in_(("approved", "rejected")),
+                                       Report.reviewed_at >= since)
+               .order_by(Report.reviewed_at.desc()).limit(5000).all())
+    runs: dict[str, AgentRun] = {}
+    if reports:
+        for run in (db.query(AgentRun).filter(AgentRun.report_id.in_([r.id for r in reports]))
+                    .order_by(AgentRun.id).all()):
+            runs[run.report_id] = run                       # the latest run per report wins
+    records = []
+    for r in reports:
+        run, ver = runs.get(r.id), r.verification or {}
+        pv = (run.prompt_versions if run else None) or {}
+        records.append({
+            "status": r.review_status, "edited": bool(r.review_edited), "edit_ratio": r.edit_ratio,
+            "verifier_corrected": bool(ver.get("clinical_corrected") or ver.get("patient_corrected")),
+            "verifier_unverified": bool(ver.get("clinical_unverified") or ver.get("patient_unverified")),
+            "summarizer_version": pv.get("summarizer"), "verifier_version": pv.get("verifier"),
+            "model": run.model if run else None,
+        })
+    return {"window_days": days, **ai_quality.quality_summary(records)}
+
+
+@app.get("/admin/llm-usage")
+def llm_usage(days: int = Query(7, ge=1, le=90), db: Session = Depends(get_db),
+              principal: Principal = Depends(require_roles(ROLE_CLINICIAN))):
+    """Model usage over the last N days: calls, failures, tokens, latency and NOTIONAL cost, per
+    purpose and per prompt version. Aggregates only - no report content, no patient identifiers."""
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (db.query(LlmCall).filter(LlmCall.created_at >= since)
+            .order_by(LlmCall.id.desc()).limit(50000).all())
+    groups: dict[tuple, list[LlmCall]] = {}
+    for c in rows:
+        groups.setdefault((c.purpose, c.prompt_version or "unversioned"), []).append(c)
+    by_prompt = []
+    for (purpose, version), items in sorted(groups.items()):
+        ok = [c for c in items if c.status == "ok"]
+        lat = [c.latency_ms for c in ok if c.latency_ms is not None]
+        by_prompt.append({
+            "purpose": purpose, "prompt_version": version, "calls": len(items), "ok": len(ok),
+            "failed": len(items) - len(ok),
+            "input_tokens": sum(c.input_tokens or 0 for c in items),
+            "output_tokens": sum(c.output_tokens or 0 for c in items),
+            "notional_cost_usd": round(sum(c.cost_usd or 0 for c in items), 6),
+            "latency_ms_p50": _percentile(lat, 0.5), "latency_ms_p95": _percentile(lat, 0.95),
+        })
+    reports = {c.report_id for c in rows if c.report_id}
+    total_cost = sum(c.cost_usd or 0 for c in rows)
+    statuses: dict[str, int] = {}
+    for c in rows:
+        statuses[c.status] = statuses.get(c.status, 0) + 1
+    return {
+        "window_days": days, "calls": len(rows), "by_status": statuses,
+        "reports": len(reports), "calls_per_report": round(len(rows) / len(reports), 2) if reports else None,
+        "notional_cost_usd": round(total_cost, 6),
+        "notional_cost_per_report_usd": round(total_cost / len(reports), 6) if reports else None,
+        "cost_is_notional": True, "by_prompt": by_prompt,
+        "prompt_versions_now": prompts.current_versions(),
+    }
+
 
 @app.get("/admin/metrics")
 def metrics(db: Session = Depends(get_db),
