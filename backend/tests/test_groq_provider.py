@@ -96,6 +96,22 @@ def test_token_usage_is_read_for_call_tracing(groq):
     assert llm._usage(resp) == (11, 5)
 
 
+def test_reasoning_effort_is_sent_only_to_models_that_accept_it(groq, monkeypatch):
+    monkeypatch.setenv("GROQ_REASONING_EFFORT", "Low")
+    monkeypatch.setattr(llm, "MODEL", "openai/gpt-oss-120b")
+    asyncio.run(llm.generate_text("x", label="T"))
+    monkeypatch.setattr(llm, "MODEL", "some/other-model")
+    asyncio.run(llm.generate_text("x", label="T"))
+    assert groq["requests"][0]["body"]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in groq["requests"][1]["body"]
+
+
+def test_the_default_model_is_not_one_groq_has_retired():
+    retired = {"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b",
+               "meta-llama/llama-4-scout-17b-16e-instruct"}
+    assert llm.GROQ_DEFAULT_MODEL not in retired
+
+
 def test_a_missing_key_fails_before_any_request(groq, monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY")
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):

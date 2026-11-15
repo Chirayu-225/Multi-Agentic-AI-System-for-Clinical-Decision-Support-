@@ -20,6 +20,9 @@ if str(BACKEND) not in sys.path:
 # Environment the app requires at startup. Set before any app import.
 # Never read the developer's real backend/.env during tests (see main.py).
 os.environ["MEDSIGHT_SKIP_DOTENV"] = "1"
+# Hard-set: a developer's shell may already export GROQ_API_KEY or LLM_PROVIDER, and the suite's
+# existing tests fake the Gemini SDK. Provider tests switch it themselves (tests/test_groq_provider.py).
+os.environ["LLM_PROVIDER"] = "gemini"
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-production-0123456789")
 # Hard-set, never setdefault: the API tests DROP ALL TABLES between tests. A DATABASE_URL

@@ -63,12 +63,14 @@ def resolve_provider(env=os.environ) -> str:
 
 PROVIDER = resolve_provider()
 GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
-GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"     # free tier, supports tool calling and JSON mode
+# Groq retired llama-3.3-70b-versatile and llama-3.1-8b-instant on 2026-08-16 for free accounts; its
+# deprecations page names openai/gpt-oss-120b as the replacement (a production model).
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
 DEFAULT_MODEL = GROQ_DEFAULT_MODEL if PROVIDER == "groq" else GEMINI_DEFAULT_MODEL
 if PROVIDER == "groq":
     MODEL = os.getenv("GROQ_MODEL", GROQ_DEFAULT_MODEL)
-    # Opt-in only: a smaller fallback model (for example llama-3.1-8b-instant, which has a much larger
-    # daily allowance) gives different answers, so it is never used unless asked for.
+    # Opt-in only: a smaller fallback model (for example openai/gpt-oss-20b) gives different answers,
+    # so it is never used unless asked for.
     FALLBACK_MODEL = (os.getenv("GROQ_FALLBACK_MODEL") or "").strip() or None
 else:
     MODEL = os.getenv("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
@@ -374,6 +376,9 @@ async def _groq_chat(model: str, messages: list[dict], *, tools: list | None = N
         payload["tools"], payload["tool_choice"] = tools, "auto"
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    effort = (os.getenv("GROQ_REASONING_EFFORT") or "").strip().lower()
+    if effort and model.startswith("openai/gpt-oss"):   # only these models accept it; others would answer 400
+        payload["reasoning_effort"] = effort           # low | medium | high: fewer reasoning tokens = less quota
     # One client per call: calls can run on different event loops (the app, tests, the eval gate).
     async with httpx.AsyncClient(base_url=GROQ_BASE_URL, timeout=TIMEOUT_SECONDS, transport=_groq_transport) as c:
         r = await c.post("/chat/completions", json=payload, headers={"Authorization": f"Bearer {key}"})

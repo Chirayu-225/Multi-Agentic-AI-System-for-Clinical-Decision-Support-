@@ -28,6 +28,22 @@ def report(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
+async def list_models() -> None:
+    """Which models this key can use right now (a free listing call, not an inference call)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(base_url=llm.GROQ_BASE_URL, timeout=30) as c:
+            r = await c.get("/models", headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"})
+        ids = sorted(m["id"] for m in r.json().get("data", [])) if r.status_code == 200 else []
+    except Exception as e:  # noqa: BLE001
+        print(f"models      could not list ({type(e).__name__})")
+        return
+    chat = [i for i in ids if not any(w in i for w in ("whisper", "orpheus", "guard", "tts"))]
+    print(f"models      {', '.join(chat) if chat else 'none listed (HTTP ' + str(r.status_code) + ')'}")
+    if llm.MODEL not in ids and ids:
+        print(f"WARNING     {llm.MODEL} is not in that list; set GROQ_MODEL to one that is")
+
+
 async def check_text() -> bool:
     out = await llm.generate_text("Reply with exactly the word: pong", label="CHECK")
     return report("plain text", "pong" in out.lower(), repr(out[:60]))
@@ -77,13 +93,14 @@ async def main() -> int:
     if not os.getenv("GROQ_API_KEY"):
         print("FAIL  GROQ_API_KEY is not set in backend\\.env")
         return 2
+    await list_models()
     used = llm.begin_model_tracking()
     ok = True
     for check in (check_text, check_json_mode, check_tool_call, check_verifier_agent):
         try:
             ok = await check() and ok
         except Exception as e:  # noqa: BLE001
-            ok = report(check.__name__, False, f"{type(e).__name__}: {str(e)[:160]}") and ok
+            ok = report(check.__name__, False, f"{type(e).__name__}: {str(e)[:400]}") and ok
     print(f"answered by: {', '.join(sorted(used)) or 'unknown'}")
     print("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED")
     return 0 if ok else 1
