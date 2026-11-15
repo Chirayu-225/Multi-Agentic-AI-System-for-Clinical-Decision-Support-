@@ -1,0 +1,93 @@
+"""
+scripts/check_groq.py - check that this machine can make every kind of Groq call the app uses.
+
+    python scripts\check_groq.py
+
+Needs GROQ_API_KEY in backend\.env (the script loads it itself and never prints it). Makes 4 small
+calls: plain text, JSON mode with the verifier's schema, a tool call and its answer, and the real
+Verifier agent on one summary. Prints PASS or FAIL per check, then the model(s) that answered.
+"""
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(ROOT / ".env")
+os.environ["LLM_PROVIDER"] = "groq"                      # this script is about Groq whatever the default is
+
+import src.llm as llm  # noqa: E402
+
+
+def report(name: str, ok: bool, detail: str = "") -> bool:
+    print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  - {detail}" if detail else ""))
+    return ok
+
+
+async def check_text() -> bool:
+    out = await llm.generate_text("Reply with exactly the word: pong", label="CHECK")
+    return report("plain text", "pong" in out.lower(), repr(out[:60]))
+
+
+async def check_json_mode() -> bool:
+    from src.agents.verifier import AuditResult, parse_audit
+    prompt = ('Audit these two summaries against the data. Data: Hemoglobin 9.2 g/dL. '
+              'CLINICAL SUMMARY: Hemoglobin is 9.2 g/dL, low. PATIENT SUMMARY: Your blood count is low. '
+              'Return a verdict (PASS or FAIL) for each, with issues and a corrected text only on FAIL.')
+    out = await llm.generate_text(prompt, json_schema=AuditResult, label="CHECK")
+    try:
+        parsed = parse_audit(out)
+    except Exception as e:  # noqa: BLE001
+        return report("JSON mode matches the verifier schema", False, f"{type(e).__name__}: {str(e)[:120]}")
+    return report("JSON mode matches the verifier schema", parsed is not None, "parsed")
+
+
+async def check_tool_call() -> bool:
+    tools = llm.openai_tools([{"name": "lookup_range", "description": "Look up the reference range for a lab test.",
+                               "parameters": {"type": "object", "properties": {"test": {"type": "string"}},
+                                              "required": ["test"]}}])
+
+    async def open_chat(model):
+        chat = llm.GroqChat(model, "You are a lab assistant. Use the tool when asked about ranges.", tools)
+        return chat, await chat.send_message("What is the normal range for hemoglobin? Use the tool.")
+
+    (chat, first), _model = await llm.with_fallback(open_chat, label="CHECK", attempts=2, base_wait=10)
+    calls = list(first.function_calls)
+    if not calls:
+        return report("tool call", False, "the model did not request the tool")
+    second = await chat.send_message([llm.ToolResult(c.name, {"range": "12-15 g/dL"}, c.id) for c in calls])
+    return report("tool call and answer", bool(second.text), repr(second.text[:70]))
+
+
+async def check_verifier_agent() -> bool:
+    from src.agents.verifier import verify_and_correct
+    entities = {"lab_values": [{"test": "Hemoglobin", "value": 9.2, "unit": "g/dL"}], "medications": [],
+                "patient": {"gender": "Female", "age": "34"}}
+    out = await verify_and_correct("Hemoglobin is 9.2 g/dL, which is low.", "Your blood count is a little low.",
+                                   entities, [], [])
+    return report("verifier agent", not out["clinical_unverified"], f"unverified={out['clinical_unverified']}")
+
+
+async def main() -> int:
+    print(f"provider {llm.PROVIDER}   model {llm.MODEL}   fallback {llm.FALLBACK_MODEL or 'none'}")
+    if not os.getenv("GROQ_API_KEY"):
+        print("FAIL  GROQ_API_KEY is not set in backend\\.env")
+        return 2
+    used = llm.begin_model_tracking()
+    ok = True
+    for check in (check_text, check_json_mode, check_tool_call, check_verifier_agent):
+        try:
+            ok = await check() and ok
+        except Exception as e:  # noqa: BLE001
+            ok = report(check.__name__, False, f"{type(e).__name__}: {str(e)[:160]}") and ok
+    print(f"answered by: {', '.join(sorted(used)) or 'unknown'}")
+    print("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

@@ -1,6 +1,13 @@
 """
 src/llm.py
 
+The ONE place this project talks to a model provider: Gemini (google-genai) or Groq (its
+OpenAI-compatible HTTP API). LLM_PROVIDER picks one; with no setting, Groq is used when
+GROQ_API_KEY is set, otherwise Gemini. Everything below the provider switch (retries, circuit
+breaker, rate limiter, call tracing, fallback model) is shared, so both behave the same way.
+
+The rest of this note was written for Gemini and still holds for it.
+
 The ONE place this project talks to Gemini. Every agent (orchestrator, summarizer,
 verifier, translator) imports from here, so the model, the SDK and the retry policy
 cannot drift apart again.
@@ -29,8 +36,10 @@ Timeouts, retries, fallback:
 
 import asyncio
 import contextvars
+import json
 import logging
 import os
+from typing import Any, NamedTuple
 
 import time
 
@@ -42,10 +51,35 @@ logger = logging.getLogger("medsight")
 # gemini-2.5-flash is not deprecated, but Google limits it to API keys that used it
 # before, so a fresh deployment with a new key cannot call it. Default to a current
 # stable model; override with GEMINI_MODEL.
-DEFAULT_MODEL = "gemini-3.8-flash"
-MODEL = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
-FALLBACK_MODEL = (os.getenv("GEMINI_FALLBACK_MODEL") or "").strip() or None
-TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
+def resolve_provider(env=os.environ) -> str:
+    """LLM_PROVIDER if set; else groq when a Groq key is present; else gemini."""
+    chosen = (env.get("LLM_PROVIDER") or "").strip().lower()
+    if chosen in ("gemini", "groq"):
+        return chosen
+    if chosen:
+        raise RuntimeError(f"LLM_PROVIDER must be 'gemini' or 'groq', got {chosen!r}")
+    return "groq" if env.get("GROQ_API_KEY") else "gemini"
+
+
+PROVIDER = resolve_provider()
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"     # free tier, supports tool calling and JSON mode
+DEFAULT_MODEL = GROQ_DEFAULT_MODEL if PROVIDER == "groq" else GEMINI_DEFAULT_MODEL
+if PROVIDER == "groq":
+    MODEL = os.getenv("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+    # Opt-in only: a smaller fallback model (for example llama-3.1-8b-instant, which has a much larger
+    # daily allowance) gives different answers, so it is never used unless asked for.
+    FALLBACK_MODEL = (os.getenv("GROQ_FALLBACK_MODEL") or "").strip() or None
+else:
+    MODEL = os.getenv("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
+    FALLBACK_MODEL = (os.getenv("GEMINI_FALLBACK_MODEL") or "").strip() or None
+TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS") or os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+_groq_transport = None          # tests inject an httpx.MockTransport here; None means the real network
+
+
+def required_key_name() -> str:
+    return "GROQ_API_KEY" if PROVIDER == "groq" else "GEMINI_API_KEY"
 
 # Provider-health protection (see src/resilience.py). One breaker per model, because the fallback
 # model exists precisely for when the main one is overloaded; one rate limiter for the whole
@@ -176,13 +210,35 @@ def get_client():
     return _client
 
 
+class ProviderHTTPError(Exception):
+    """The provider answered with an HTTP error status (used for Groq; the Gemini SDK has its own)."""
+
+    def __init__(self, status: int, detail: str = ""):
+        super().__init__(f"{status} {_STATUS_WORDS.get(status, 'ERROR')}: {detail[:300]}")
+        self.status = status
+
+
+_STATUS_WORDS = {429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "BAD_GATEWAY", 503: "UNAVAILABLE",
+                 504: "DEADLINE_EXCEEDED"}
+
+
 def is_rate_limit(err: Exception) -> bool:
+    if isinstance(err, ProviderHTTPError):
+        return err.status == 429
     s = str(err)
     return "429" in s or "RESOURCE_EXHAUSTED" in s
 
 
 def is_unavailable(err: Exception) -> bool:
     """Overloaded / transient server-side failure, or a timeout: worth retrying."""
+    if isinstance(err, ProviderHTTPError):
+        return err.status in (500, 502, 503, 504)
+    try:
+        import httpx
+        if isinstance(err, httpx.TransportError):      # timeouts, refused or dropped connections
+            return True
+    except ImportError:                                # pragma: no cover - httpx is a hard requirement
+        pass
     s = str(err)
     if any(code in s for code in ("503", "UNAVAILABLE", "500 INTERNAL", "504", "DEADLINE_EXCEEDED")):
         return True
@@ -265,12 +321,122 @@ async def with_fallback(make_call, *, label: str, attempts: int = 3, base_wait: 
     return result, FALLBACK_MODEL
 
 
+# ── Groq (OpenAI-compatible chat completions over HTTP) ───────────────────────────────────────────
+
+class FunctionCall(NamedTuple):
+    name: str
+    args: dict
+    id: str | None = None
+
+
+class ToolResult(NamedTuple):
+    """A tool's output going back to the model. `call_id` ties it to the call it answers."""
+    name: str
+    result: Any
+    call_id: str | None = None
+
+
+class _Usage(NamedTuple):
+    prompt_token_count: int
+    candidates_token_count: int
+
+
+class GroqResponse:
+    """The parts of a reply the rest of the app reads, named as the Gemini SDK names them so the
+    tracing and the orchestrator loop need no provider checks."""
+
+    def __init__(self, message: dict, usage: dict | None):
+        self.message = message
+        self.text = (message.get("content") or "").strip()
+        self.function_calls = [_parse_tool_call(tc) for tc in (message.get("tool_calls") or [])]
+        u = usage or {}
+        self.usage_metadata = _Usage(int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0))
+
+
+def _parse_tool_call(tc: dict) -> FunctionCall:
+    fn = tc.get("function") or {}
+    raw = fn.get("arguments") or "{}"
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        args = {}
+    return FunctionCall(name=fn.get("name", ""), args=args if isinstance(args, dict) else {}, id=tc.get("id"))
+
+
+async def _groq_chat(model: str, messages: list[dict], *, tools: list | None = None,
+                     json_mode: bool = False) -> GroqResponse:
+    import httpx
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise RuntimeError("GROQ_API_KEY is not set")
+    payload: dict = {"model": model, "messages": messages, "temperature": 0.2}
+    if tools:
+        payload["tools"], payload["tool_choice"] = tools, "auto"
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    # One client per call: calls can run on different event loops (the app, tests, the eval gate).
+    async with httpx.AsyncClient(base_url=GROQ_BASE_URL, timeout=TIMEOUT_SECONDS, transport=_groq_transport) as c:
+        r = await c.post("/chat/completions", json=payload, headers={"Authorization": f"Bearer {key}"})
+    if r.status_code >= 400:
+        raise ProviderHTTPError(r.status_code, r.text)
+    body = r.json()
+    try:
+        message = body["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        raise ProviderHTTPError(502, "malformed response from provider") from None
+    return GroqResponse(message, body.get("usage"))
+
+
+class GroqChat:
+    """A multi-turn conversation with tool calling, shaped like the Gemini chat the orchestrator uses.
+    The history only changes after a turn succeeds, so a retried turn never duplicates a message."""
+
+    def __init__(self, model: str, system_instruction: str, tools: list):
+        self.model = model
+        self.tools = tools
+        self.messages: list[dict] = [{"role": "system", "content": system_instruction}]
+
+    async def send_message(self, message) -> GroqResponse:
+        if isinstance(message, str):
+            new = [{"role": "user", "content": message}]
+        else:                                           # a list of ToolResult
+            new = [{"role": "tool", "tool_call_id": r.call_id or r.name,
+                    "content": json.dumps(r.result, default=str)} for r in message]
+        resp = await _groq_chat(self.model, self.messages + new, tools=self.tools)
+        reply = {"role": "assistant", "content": resp.message.get("content")}
+        if resp.message.get("tool_calls"):
+            reply["tool_calls"] = resp.message["tool_calls"]
+        self.messages = self.messages + new + [reply]
+        return resp
+
+
+def openai_tools(tool_defs: list[dict]) -> list[dict]:
+    """TOOL_DEFINITIONS (name, description, JSON-Schema parameters) in the chat-completions format."""
+    return [{"type": "function", "function": {"name": d["name"], "description": d["description"],
+                                              "parameters": d["parameters"]}} for d in tool_defs]
+
+
 async def generate_text(prompt: str, *, system_instruction: str | None = None,
                         label: str = "LLM", attempts: int = 3, base_wait: int = 35,
                         json_schema=None) -> str:
     """Single-turn text generation used by the summarizer, verifier and translator.
     With `json_schema` (a pydantic model) Gemini is asked for JSON matching it; the caller still
     validates the result, because a schema request is a strong hint, not a guarantee."""
+    if PROVIDER == "groq":
+        system = system_instruction or ""
+        if json_schema is not None:
+            # Groq's JSON mode guarantees valid JSON, not this shape: state the shape, and the caller validates.
+            system = (system + "\n\n" if system else "") + (
+                "Respond with ONE JSON object that matches this JSON Schema, and nothing else:\n"
+                + json.dumps(json_schema.model_json_schema()))
+        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+
+        async def _groq_call(model: str):
+            return (await _groq_chat(model, messages, json_mode=json_schema is not None)).text
+
+        text, _model = await with_fallback(_groq_call, label=label, attempts=attempts, base_wait=base_wait)
+        return text
+
     from google.genai import types
 
     kwargs = {}

@@ -53,7 +53,7 @@ from src.ingestion.document_loader import (
 )
 from src.agents.orchestrator import run_orchestrator
 from src import ai_quality, outbox, prompts
-from src.llm import begin_call_tracking, begin_model_tracking, llm_unavailable_for
+from src.llm import begin_call_tracking, begin_model_tracking, llm_unavailable_for, required_key_name
 from src.agents.summarizer import generate_summaries
 from src.agents.verifier import verify_and_correct
 from src.agents.translator import (LANGUAGES, is_supported, translate_patient_summary)
@@ -164,7 +164,7 @@ def _ip(request: Request) -> str:
 async def startup():
     # Fail fast and loud on missing secrets rather than 500ing on first
     # request — much easier to diagnose in a demo / interview setting.
-    required = ["GEMINI_API_KEY"]
+    required = [required_key_name()]
     missing = [v for v in required if not os.getenv(v)]
     if missing:
         raise RuntimeError(

@@ -30,6 +30,7 @@ import asyncio
 import logging
 from typing import Callable
 
+from src import llm as _llm
 from src.llm import MODEL, get_client, with_fallback, with_retry
 
 logger = logging.getLogger("medsight")
@@ -127,6 +128,14 @@ def _build_gemini_tools() -> list:
         if tool_def["name"] in _enabled_tools()
     ]
     return [types.Tool(function_declarations=declarations)]
+
+
+def _tool_result_message(tool_name: str, result: dict, call_id: str | None = None):
+    """A tool's output in the form the active provider's chat session expects back."""
+    if _llm.PROVIDER == "groq":
+        return _llm.ToolResult(tool_name, result, call_id)
+    from google.genai import types
+    return types.Part.from_function_response(name=tool_name, response=result)
 
 
 async def _execute_tool(tool_name: str, tool_args: dict) -> dict:
@@ -378,16 +387,19 @@ async def run_orchestrator(
             logger.exception("preliminary hook failed; continuing with the full analysis")
 
     # ── Agentic phase — only the 3 genuinely conditional tools ──────────────
-    from google.genai import types
     system_prompt = ORCHESTRATOR_SYSTEM_PROMPT
     if "search_pubmed" not in _enabled_tools():
         system_prompt = _without_tool_bullet(system_prompt, "search_pubmed")
-    chat_config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        tools=_build_gemini_tools(),
-        # We run the tools ourselves (concurrently, with caching) — the SDK must not.
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
+    if _llm.PROVIDER == "groq":
+        chat_tools = _llm.openai_tools([t for t in TOOL_DEFINITIONS if t["name"] in _enabled_tools()])
+    else:
+        from google.genai import types
+        chat_config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            tools=_build_gemini_tools(),
+            # We run the tools ourselves (concurrently, with caching) — the SDK must not.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
 
     context_summary = _summarize_for_prompt(
         entities, accumulated_data["rule_flags"], accumulated_data["trend_flags"],
@@ -417,7 +429,10 @@ this turn.
         # Open the chat on the pinned model, or on GEMINI_FALLBACK_MODEL if it is overloaded.
         # Later turns stay on whichever model answered the first (a chat can't switch models).
         async def _open(model):
-            c = get_client().aio.chats.create(model=model, config=chat_config)
+            if _llm.PROVIDER == "groq":
+                c = _llm.GroqChat(model, system_prompt, chat_tools)
+            else:
+                c = get_client().aio.chats.create(model=model, config=chat_config)
             return c, await c.send_message(initial_message)
 
         (chat, response), model_used = await with_fallback(_open, label="ORCHESTRATOR",
@@ -459,18 +474,19 @@ this turn.
             async def _run_tracked(fc):
                 tool_name = fc.name
                 tool_args = _to_plain(fc.args or {})
+                call_id = getattr(fc, "id", None)
                 key = _cache_key(tool_name, tool_args)
                 if key in executed_calls_cache:
-                    return tool_name, tool_args, executed_calls_cache[key], True
+                    return tool_name, tool_args, executed_calls_cache[key], True, call_id
                 result = await _execute_tool(tool_name, tool_args)
                 executed_calls_cache[key] = result
-                return tool_name, tool_args, result, False
+                return tool_name, tool_args, result, False, call_id
 
             executed = await asyncio.gather(*[_run_tracked(fc) for fc in tool_calls_in_response])
-            any_new_work = any(not was_cached for (_, _, _, was_cached) in executed)
+            any_new_work = any(not was_cached for (_, _, _, was_cached, _) in executed)
 
             tool_results = []
-            for tool_name, tool_args, result, was_cached in executed:
+            for tool_name, tool_args, result, was_cached, call_id in executed:
                 if not was_cached:
                     # Only accumulate/log on the FIRST time a given (tool, args)
                     # pair actually ran — a repeat is the same information, not
@@ -506,9 +522,7 @@ this turn.
                 # Gemini requires a function_response for every function_call in
                 # the turn regardless of whether we actually re-ran it, so the
                 # model sees a consistent conversation either way.
-                tool_results.append(
-                    types.Part.from_function_response(name=tool_name, response=result)
-                )
+                tool_results.append(_tool_result_message(tool_name, result, call_id))
 
             if not any_new_work:
                 # Every call this turn was a repeat of something we already have

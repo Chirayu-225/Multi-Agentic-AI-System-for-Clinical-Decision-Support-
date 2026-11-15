@@ -335,8 +335,9 @@ def run(live: bool = False) -> dict:
         "interactions": eval_interactions(),
     }
     if live:
-        if not os.getenv("GEMINI_API_KEY"):
-            raise SystemExit("--live needs GEMINI_API_KEY")
+        from src.llm import required_key_name
+        if not os.getenv(required_key_name()):
+            raise SystemExit(f"--live needs {required_key_name()}")
         res["live_verifier"] = eval_live_verifier(cases)
     res["meta"]["seconds"] = round(time.time() - t0, 2)
     return res
