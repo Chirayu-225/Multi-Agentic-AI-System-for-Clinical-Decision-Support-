@@ -1,0 +1,15 @@
+{
+ "model": "openai/gpt-oss-120b",
+ "prompt_versions": {
+  "orchestrator": "273ee85d36",
+  "summarizer": "4e8f94dc1f",
+  "verifier": "a66410fd1c",
+  "translator": "c7dc464687"
+ },
+ "metrics": {
+  "verifier.catch_rate": 1.0,
+  "verifier.false_alarm_rate": 0.0,
+  "verifier.unverified_rate": 0.0,
+  "summarizer.ungrounded_rate": 0.0
+ }
+}
