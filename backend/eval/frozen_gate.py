@@ -53,6 +53,10 @@ METRICS = {
 }
 
 
+class ProviderDown(Exception):
+    """Several calls in a row failed: the run is invalid and further calls would only burn quota."""
+
+
 class QuotaGuard(Exception):
     pass
 
@@ -161,17 +165,35 @@ class CallCounter:
 
     def __init__(self, cap: int):
         self.cap, self.used, self.exhausted = cap, 0, False
+        self.errors: list[str] = []                  # provider/transport failures, not bad model output
+        self.streak, self.aborted = 0, False         # consecutive failures; set when the provider is plainly down
+        self.max_streak = _env_int("GATE_MAX_CONSECUTIVE_ERRORS", 3)
 
     def wrap(self, generate):
         async def counted(*a, **k):
+            if self.aborted:
+                raise RuntimeError("gate aborted: provider unavailable")   # costs nothing, spends no quota
             if self.used >= self.cap:
                 self.exhausted = True
                 raise RuntimeError("gate call cap reached")      # absorbed by the agent; check() aborts
             self.used += 1
-            return await generate(*a, **k)
+            try:
+                out = await generate(*a, **k)
+                self.streak = 0
+                return out
+            except Exception as e:                    # the agents absorb this and fail closed; we must not
+                self.errors.append(f"{type(e).__name__}: {e}"[:200])
+                if type(e).__name__ == "CircuitOpen":
+                    self.used -= 1                    # refused locally: never reached the provider's quota
+                self.streak += 1
+                if self.streak >= self.max_streak:
+                    self.aborted = True
+                raise
         return counted
 
     def check(self) -> None:
+        if self.aborted:
+            raise ProviderDown(f"{self.streak} calls in a row failed; stopped to save quota")
         if self.exhausted:
             raise QuotaGuard(f"call cap of {self.cap} reached mid-run")
 
@@ -268,10 +290,22 @@ async def run_gate(*, generate, frozen_path=FROZEN_PATH, baseline_path=BASELINE_
             metrics.update(await measure_verifier(frozen, guarded, counter.check))
         if "summarizer" in pl["run"]:
             metrics.update(await measure_summarizer(frozen, guarded, counter.check))
+    except ProviderDown:
+        pass                                          # reported below as an invalid run
     finally:
         _ledger_add(ledger_path, counter.used)           # real spend is recorded even on failure
     report["calls_used"] = counter.used
     report["metrics"] = metrics
+    if counter.errors:
+        # The agents swallow call failures, so the metrics above describe a fallback path, not the
+        # model. A gate that cannot run must not report "pass" or write a baseline.
+        report["call_errors"] = len(counter.errors)
+        report["first_error"] = counter.errors[0]
+        report["regressions"] = []
+        report["status"] = "invalid"
+        if update_baseline:
+            report["baseline_updated"] = False
+        return report
 
     problems = compare((baseline or {}).get("metrics", {}), metrics, _env_int("GATE_TOLERANCE_CASES", 1))
     report["regressions"] = problems
@@ -307,6 +341,10 @@ def main(argv=None) -> int:
         print(f"REFUSED (quota guard): {e}")
         return 2
     print(json.dumps(report, indent=1))
+    if report["status"] == "invalid":
+        print(f"INVALID RUN: {report['call_errors']} of {report['calls_used']} calls failed "
+              f"(first: {report['first_error']}). Nothing was measured; no baseline written.")
+        return 3
     return 1 if report["status"] == "regression" else 0
 
 

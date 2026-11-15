@@ -167,3 +167,45 @@ def test_cli_refusal_exit_code(monkeypatch, capsys):
     monkeypatch.setattr(gate, "run_gate", refuse)
     monkeypatch.setattr("src.llm.generate_text", lambda *a, **k: None, raising=False)
     assert gate.main([]) == 2 and "REFUSED" in capsys.readouterr().out
+
+
+def test_failed_calls_make_the_run_invalid_not_a_pass(paths):
+    """The agents swallow provider errors and fail closed, so without this a dead provider looked like a pass."""
+    good = make_generate()
+    state = {"n": 0}
+
+    async def flaky(prompt, **kw):
+        state["n"] += 1
+        if state["n"] % 2:
+            raise AttributeError("module 'aiohttp' has no attribute 'ClientConnectorDNSError'")
+        return await good(prompt, **kw)
+
+    report = run(paths, generate=flaky, update_baseline=True)
+    assert report["status"] == "invalid"
+    assert report["call_errors"] > 0 and "aiohttp" in report["first_error"]
+    assert report["baseline_updated"] is False
+    assert not paths["baseline_path"].exists()
+
+
+def test_cli_exit_code_for_an_invalid_run(monkeypatch, capsys):
+    async def fake_run_gate(**kw):
+        return {"status": "invalid", "call_errors": 19, "calls_used": 20, "first_error": "AttributeError: x"}
+    monkeypatch.setattr(gate, "run_gate", fake_run_gate)
+    import src.llm
+    assert gate.main([]) == 3
+    assert "INVALID RUN" in capsys.readouterr().out
+
+
+def test_a_dead_provider_stops_the_run_after_a_few_failures_and_saves_quota(paths):
+    seen = {"n": 0}
+
+    async def down(prompt, **kw):
+        seen["n"] += 1
+        raise RuntimeError("503 UNAVAILABLE")
+
+    report = run(paths, generate=down, update_baseline=True)
+    assert report["status"] == "invalid"
+    assert seen["n"] == 3                      # GATE_MAX_CONSECUTIVE_ERRORS, not the full 20
+    assert report["calls_used"] == 3
+    assert json.loads(paths["ledger_path"].read_text())  # the 3 real attempts were still recorded
+    assert not paths["baseline_path"].exists()
