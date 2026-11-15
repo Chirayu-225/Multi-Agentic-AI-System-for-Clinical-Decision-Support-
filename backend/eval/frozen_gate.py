@@ -168,6 +168,7 @@ class CallCounter:
         self.errors: list[str] = []                  # provider/transport failures, not bad model output
         self.streak, self.aborted = 0, False         # consecutive failures; set when the provider is plainly down
         self.max_streak = _env_int("GATE_MAX_CONSECUTIVE_ERRORS", 3)
+        self.served: dict[str, int] = {}             # which model actually answered each successful call
 
     def wrap(self, generate):
         async def counted(*a, **k):
@@ -177,9 +178,13 @@ class CallCounter:
                 self.exhausted = True
                 raise RuntimeError("gate call cap reached")      # absorbed by the agent; check() aborts
             self.used += 1
+            from src import llm
+            answered = llm.begin_model_tracking()   # filled by with_fallback with the model that replied
             try:
                 out = await generate(*a, **k)
                 self.streak = 0
+                for m in (answered or {"unknown"}):  # "unknown": a stand-in that does not report a model
+                    self.served[m] = self.served.get(m, 0) + 1
                 return out
             except Exception as e:                    # the agents absorb this and fail closed; we must not
                 self.errors.append(f"{type(e).__name__}: {e}"[:200])
@@ -296,6 +301,9 @@ async def run_gate(*, generate, frozen_path=FROZEN_PATH, baseline_path=BASELINE_
         _ledger_add(ledger_path, counter.used)           # real spend is recorded even on failure
     report["calls_used"] = counter.used
     report["metrics"] = metrics
+    report["served_models"] = dict(counter.served)
+    off_model = sum(n for m, n in counter.served.items() if m not in (state["model"], "unknown"))
+    report["off_primary_calls"] = off_model
     if counter.errors:
         # The agents swallow call failures, so the metrics above describe a fallback path, not the
         # model. A gate that cannot run must not report "pass" or write a baseline.
@@ -303,6 +311,17 @@ async def run_gate(*, generate, frozen_path=FROZEN_PATH, baseline_path=BASELINE_
         report["first_error"] = counter.errors[0]
         report["regressions"] = []
         report["status"] = "invalid"
+        if update_baseline:
+            report["baseline_updated"] = False
+        return report
+
+    allowed_off = _env_int("GATE_MAX_FALLBACK_CALLS", 2)
+    if off_model > allowed_off:
+        # The numbers describe another model than the one this baseline is named after. Comparing them
+        # to a baseline, or saving them as one, would be a false statement.
+        report["regressions"] = []
+        report["status"] = "off-model"
+        report["allowed_off_primary_calls"] = allowed_off
         if update_baseline:
             report["baseline_updated"] = False
         return report
@@ -345,6 +364,12 @@ def main(argv=None) -> int:
         print(f"INVALID RUN: {report['call_errors']} of {report['calls_used']} calls failed "
               f"(first: {report['first_error']}). Nothing was measured; no baseline written.")
         return 3
+    if report["status"] == "off-model":
+        print(f"OFF-MODEL RUN: {report['off_primary_calls']} of {report['calls_used']} calls were answered by "
+              f"{', '.join(sorted(m for m in report['served_models'] if m != report['state']['model']))}, not "
+              f"{report['state']['model']} (allowed: {report['allowed_off_primary_calls']}). "
+              f"No baseline written. Run again when the primary model is healthy.")
+        return 4
     return 1 if report["status"] == "regression" else 0
 
 

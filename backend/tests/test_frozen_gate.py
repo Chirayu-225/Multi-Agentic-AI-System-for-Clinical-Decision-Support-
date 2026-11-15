@@ -209,3 +209,52 @@ def test_a_dead_provider_stops_the_run_after_a_few_failures_and_saves_quota(path
     assert report["calls_used"] == 3
     assert json.loads(paths["ledger_path"].read_text())  # the 3 real attempts were still recorded
     assert not paths["baseline_path"].exists()
+
+
+def _serving(model, inner=None):
+    """A fake that reports which model answered, the way src.llm.with_fallback does."""
+    inner = inner or make_generate()
+
+    async def generate(prompt, **kw):
+        import src.llm as llm
+        llm.note_model(model)
+        return await inner(prompt, **kw)
+    return generate
+
+
+def test_a_run_answered_by_the_fallback_model_is_off_model_and_writes_no_baseline(paths):
+    report = run(paths, generate=_serving("fallback-m"), update_baseline=True)
+    assert report["status"] == "off-model"
+    assert report["served_models"] == {"fallback-m": report["calls_used"]}
+    assert report["off_primary_calls"] == report["calls_used"]
+    assert report["baseline_updated"] is False
+    assert not paths["baseline_path"].exists()
+
+
+def test_a_run_on_the_primary_model_records_who_answered_and_saves_the_baseline(paths):
+    report = run(paths, generate=_serving(STATE["model"]), update_baseline=True)
+    assert report["status"] == "pass" and report["off_primary_calls"] == 0
+    assert report["served_models"] == {STATE["model"]: report["calls_used"]}
+    assert paths["baseline_path"].exists()
+
+
+def test_a_couple_of_fallback_calls_are_tolerated(paths):
+    n = {"i": 0}
+    primary, fallback = _serving(STATE["model"]), _serving("fallback-m")
+
+    async def mostly_primary(prompt, **kw):
+        n["i"] += 1
+        return await (fallback if n["i"] in (3, 9) else primary)(prompt, **kw)
+
+    report = run(paths, generate=mostly_primary, update_baseline=True)
+    assert report["status"] == "pass" and report["off_primary_calls"] == 2
+    assert paths["baseline_path"].exists()
+
+
+def test_cli_exit_code_for_an_off_model_run(monkeypatch, capsys):
+    async def fake_run_gate(**kw):
+        return {"status": "off-model", "off_primary_calls": 20, "calls_used": 20, "allowed_off_primary_calls": 2,
+                "served_models": {"b": 20}, "state": {"model": "a"}}
+    monkeypatch.setattr(gate, "run_gate", fake_run_gate)
+    assert gate.main([]) == 4
+    assert "OFF-MODEL RUN" in capsys.readouterr().out
