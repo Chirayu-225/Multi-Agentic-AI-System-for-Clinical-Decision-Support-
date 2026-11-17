@@ -11,6 +11,8 @@ backend/data/
 # Databases — never commit runtime data (contains patient report content)
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 backend/medsight.db

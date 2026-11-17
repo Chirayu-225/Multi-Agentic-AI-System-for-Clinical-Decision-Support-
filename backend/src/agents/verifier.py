@@ -38,11 +38,17 @@ CLINICAL summary and a PATIENT summary. Audit them independently — one may pas
 other fails.
 
 Rules (apply to each summary separately):
-1. Every specific value, condition, or medication mentioned in a summary MUST appear in the
-   ground truth
-2. If a summary mentions ANY value not in the ground truth, its verdict is FAIL
-3. If a summary is consistent with the ground truth, its verdict is PASS
-4. Always list specific issues found for each summary, or "none" if clean
+1. Every specific value and medication mentioned in a summary MUST appear in the ground truth.
+2. A condition may be named only if it is in the ground truth, or if it is the plain meaning of a
+   flagged value (for example "severe anaemia" for a CRITICAL low hemoglobin). Saying how urgent a
+   flagged result is, or telling the patient to contact their doctor, is allowed. A cause or a
+   diagnosis that the data does not support is NOT allowed.
+3. If a summary mentions ANY value not in the ground truth, or breaks rule 2, its verdict is FAIL.
+4. If a summary is consistent with the ground truth, its verdict is PASS.
+5. Always list specific issues found for each summary, or "none" if clean.
+6. When you rewrite a summary ("corrected"), keep every CRITICAL result with its value, keep the
+   statement of how urgent it is, and in the patient summary keep the advice to contact their
+   doctor. Remove only what was unsupported.
 
 Output: ONLY a JSON object, no prose and no code fences, exactly this shape:
 {"clinical": {"verdict": "PASS" or "FAIL", "issues": [<each unsupported claim as a string>],
@@ -198,6 +204,125 @@ def _side_result(side: SideAudit, original: str) -> dict:
     }
 
 
+# ── Completeness: a check the model does not get a vote on ─────────────────────────────────────
+# The audit above looks for claims that are wrong. It says nothing about what a summary leaves
+# out, and a summary that leaves out everything ("no significant findings") has no wrong claims
+# at all - it passed, with "verified" beside it, on a report with two critical values. So the
+# one omission that matters most is checked in code: every CRITICAL lab flag has to be mentioned
+# in the clinical summary, by its value or by its name, or the summary is not verified.
+
+_NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers_in(text: str) -> set[float]:
+    out = set()
+    for token in _NUMBER.findall(text or ""):
+        try:
+            out.add(float(token.replace(",", "")))
+        except ValueError:
+            pass
+    return out
+
+
+def _names_for(test: str) -> set[str]:
+    """Every way this codebase knows of writing a test's name, plus the name as flagged."""
+    from src.flagging.risk_flagging import DIRECT_CANONICAL, LAB_ALIASES, _canonical_name
+    raw = (test or "").strip().lower()
+    names = {raw, re.sub(r"\s*\(.*?\)\s*", " ", raw).strip(), raw.replace("_", " ")}
+    try:
+        canonical = _canonical_name(test or "")
+    except Exception:  # noqa: BLE001 - an odd name just means fewer aliases
+        canonical = None
+    if canonical:
+        names.add(canonical.replace("_", " "))
+        for table in (DIRECT_CANONICAL, LAB_ALIASES):
+            names.update(alias for alias, target in table.items() if target == canonical)
+    return {n for n in names if len(n) >= 2}
+
+
+def missing_critical_results(summary: str, flags: list) -> list[str]:
+    """Names of the CRITICAL lab flags that `summary` mentions neither by value nor by name."""
+    from src.flagging.risk_flagging import Severity, normalize_severity
+    text = (summary or "").lower()
+    numbers = _numbers_in(text)
+    missing = []
+    for f in flags or []:
+        if normalize_severity(f.get("severity")) != Severity.CRITICAL:
+            continue
+        try:
+            value_cited = float(f.get("value")) in numbers
+        except (TypeError, ValueError):
+            value_cited = False
+        name_cited = any(re.search(rf"(?<![a-z0-9]){re.escape(n)}(?![a-z0-9])", text)
+                         for n in _names_for(str(f.get("test") or "")))
+        if not (value_cited or name_cited):
+            missing.append(str(f.get("test") or "unnamed test"))
+    return missing
+
+
+NO_SUMMARY_REASON = ("No AI summary was produced for this report, so there was nothing to verify. "
+                     "Review the flagged results directly.")
+NO_PATIENT_SUMMARY = "No patient summary was produced for this report."
+NO_URGENCY = ("This summary gives the critical result(s) but does not say they are critical or urgent. "
+              "Read the flagged results; do not rely on this summary.")
+NO_DOCTOR_ADVICE = ("This patient summary gives critical results but does not tell the patient to contact "
+                    "their doctor.")
+
+# Words that say a result is serious or time-sensitive, and words that point the patient to care.
+# Deliberately broad: these checks catch a summary that says nothing of the kind, not bad style.
+_URGENCY = re.compile(r"\b(critical(ly)?|urgent(ly)?|immediate(ly)?|same[-\u2010-\u2015 ]day|emergency|severe(ly)?|"
+                      r"dangerous(ly)?|life[-\u2010-\u2015 ]threatening|prompt(ly)?|without delay|today|right away)\b",
+                      re.IGNORECASE)
+_CARE_CONTACT = re.compile(r"\b(doctor|physician|clinician|gp|healthcare provider|health care provider|"
+                           r"care team|medical team|hospital|emergency|clinic)\b", re.IGNORECASE)
+
+
+def _has_critical(flags: list) -> bool:
+    from src.flagging.risk_flagging import Severity, normalize_severity
+    return any(normalize_severity(f.get("severity")) == Severity.CRITICAL for f in flags or [])
+
+
+def check_summaries(clinical: str, patient: str, flags: list) -> dict:
+    """What a summary must contain, checked in code on the text that will be shown.
+
+    Returns {"clinical": reason or None, "patient": reason or None, "missing_critical": [...]}.
+    A reason means that summary is not verified, whatever the model audit said:
+      * clinical: produced at all; names every CRITICAL result; says they are critical or urgent;
+      * patient:  produced at all; with a CRITICAL result, tells the patient to contact their doctor.
+    The last two exist because a summary that only lists the values ("Your hemoglobin is 6.2 g/dL")
+    contains no false claim, so the audit passes it, yet it tells neither reader that anything is wrong.
+    """
+    from src.agents.summarizer import is_placeholder
+    critical = _has_critical(flags)
+    missing: list[str] = []
+    clinical_reason = patient_reason = None
+    if is_placeholder(clinical):
+        clinical_reason = NO_SUMMARY_REASON
+    else:
+        missing = missing_critical_results(clinical, flags)
+        if missing:
+            clinical_reason = (f"This summary does not mention {len(missing)} critical result(s): "
+                               f"{', '.join(missing)}. Read the flagged results; do not rely on this summary.")
+        elif critical and not _URGENCY.search(clinical):
+            clinical_reason = NO_URGENCY
+    if is_placeholder(patient):
+        patient_reason = NO_PATIENT_SUMMARY
+    elif critical and not _CARE_CONTACT.search(patient):
+        patient_reason = NO_DOCTOR_ADVICE
+    return {"clinical": clinical_reason, "patient": patient_reason, "missing_critical": missing}
+
+
+def content_issues(checked: dict) -> list[str]:
+    """The reasons from check_summaries, in the order a clinician should read them."""
+    if checked["clinical"] == NO_SUMMARY_REASON and checked["patient"] == NO_PATIENT_SUMMARY:
+        return [NO_SUMMARY_REASON]                     # one message, not two, when nothing was written
+    return [r for r in (checked["clinical"], checked["patient"]) if r]
+
+
+def _not_verified(side: dict, reason: str) -> dict:
+    return {**side, "passed": False, "unverified": True, "issues": reason}
+
+
 async def verify_and_correct(
     clinical_summary: str,
     patient_summary: str,
@@ -229,6 +354,20 @@ async def verify_and_correct(
             patient_issues: str,
         }
     """
+    from src.agents.summarizer import is_placeholder
+    if is_placeholder(clinical_summary) and is_placeholder(patient_summary):
+        # Nothing was written, so there is nothing to audit: do not spend a model call on it, and
+        # above all do not let "no claims found" come back as "verified".
+        return {
+            "clinical_summary": clinical_summary, "patient_summary": patient_summary,
+            "clinical_corrected": False, "patient_corrected": False,
+            "clinical_unverified": True, "patient_unverified": True,
+            "clinical_issues": NO_SUMMARY_REASON, "patient_issues": NO_SUMMARY_REASON,
+            "clinical_missing_critical": missing_critical_results("", flags),
+            "content_issues": [NO_SUMMARY_REASON],
+            "clinical_audit_unverified": True,
+        }
+
     ground_truth = _build_ground_truth(entities, flags, trend_flags, redaction_map, drug_interactions)
 
     prompt = _build_audit_prompt(ground_truth, clinical_summary, patient_summary)
@@ -280,7 +419,23 @@ async def verify_and_correct(
     clinical_result = parsed["clinical"]
     patient_result = parsed["patient"]
 
+    # Whether the model audit itself ran, before the content checks below add their own reasons. The
+    # eval gate scores the audit on this, so a summary that is merely incomplete is not counted as an
+    # audit failure.
+    audit_unverified = clinical_result["unverified"]
+
+    # Checks in code, applied to the text that will actually be shown (after any correction).
+    checked = check_summaries(clinical_result["final_summary"], patient_result["final_summary"], flags)
+    if checked["clinical"]:
+        clinical_result = _not_verified(clinical_result, checked["clinical"])
+    if checked["patient"]:
+        reason = NO_SUMMARY_REASON if checked["patient"] == NO_PATIENT_SUMMARY else checked["patient"]
+        patient_result = _not_verified(patient_result, reason)
+
     return {
+        "clinical_missing_critical": checked["missing_critical"],
+        "clinical_audit_unverified": audit_unverified,
+        "content_issues": content_issues(checked),
         "clinical_summary": clinical_result["final_summary"],
         "patient_summary": patient_result["final_summary"],
         "clinical_corrected": clinical_result["was_corrected"],

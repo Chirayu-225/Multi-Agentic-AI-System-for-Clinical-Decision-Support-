@@ -17,6 +17,7 @@ failed. "Residual risk" is what the control does NOT cover.
   waiting out their own retries.
 - Tests: `tests/test_fast_path.py::test_preliminary_report_exists_before_the_first_model_step`, `tests/test_fast_path.py::test_provider_outage_defers_the_job_and_keeps_the_critical_result_visible`, `tests/test_fast_path.py::test_critical_reports_are_listed_first_in_the_review_queue`, `tests/test_resilience.py::test_with_retry_trips_the_breaker_and_later_calls_fail_without_calling_the_provider`
 - Residual risk: a clinician must actually look at the queue; there is no paging or push alert.
+  These controls make the flags visible; H16 and H17 cover the banner and the summary beside them.
 
 ## H2 - Unreviewed or incomplete AI output reaches a patient
 - Severity: major
@@ -131,3 +132,53 @@ failed. "Residual risk" is what the control does NOT cover.
   a different one if it is given up on.
 - Tests: `tests/test_outbox.py::test_failed_write_stays_queued_with_a_visible_warning_then_succeeds_on_retry`, `tests/test_outbox.py::test_gives_up_after_max_attempts_and_says_so`
 - Residual risk: after giving up, trend and baseline checks omit the report until it is re-indexed.
+
+## H16 - The overall risk level understates the lab flags
+- Severity: catastrophic
+- Cause: a severity reaches the code that totals them in a form it does not recognise. The tool
+  layer writes "Severity.CRITICAL"; the total compared against the enum, so no lab flag counted and
+  a report with two critical values was shown as "Risk Level NORMAL, 0 Critical".
+- Controls: one function reads every form a severity takes; a severity that cannot be read is
+  counted and never treated as normal; the risk summary is recomputed from the stored flags every
+  time a report is read, so reports saved before the fix are shown correctly too.
+- Tests: `tests/test_critical_not_hidden.py::test_critical_lab_flags_from_the_real_tool_path_make_the_report_critical`, `tests/test_critical_not_hidden.py::test_the_orchestrator_reports_critical_for_a_critical_report`, `tests/test_critical_not_hidden.py::test_a_severity_that_cannot_be_read_is_never_treated_as_normal`, `tests/test_api_flow.py::test_a_report_stored_before_the_fix_is_shown_with_the_right_level`
+- Residual risk: a test the reference table does not know raises no flag, so it cannot raise the
+  level; forecast flags are not part of the level.
+
+## H17 - A failed or incomplete AI summary reads as an all-clear
+- Severity: catastrophic
+- Cause: the model answers in a format the reader does not expect, or returns nothing, and the gap
+  is filled with reassuring text ("No significant findings", "Routine monitoring recommended"); or
+  the summary leaves a critical result out. An audit that only looks for false claims passes both.
+- Controls: the reader accepts the header styles models use; a section it cannot read becomes
+  "Summary unavailable" and no follow-up action is invented; in code, not by the model, a
+  placeholder is never verified and a clinical summary that mentions a critical lab flag neither by
+  value nor by name is not verified. A summary can also name every value and still say nothing:
+  live, Groq wrote "a hemoglobin of 6.2 g/dL and a glucose level of 540 mg/dL" and nothing else. So,
+  when a result is CRITICAL, the clinical summary must also say it is critical or urgent, and the
+  patient summary must tell the patient to contact their doctor; the prompts ask for both, and the
+  verifier's rewrite is told to keep them. The reason is shown on the report and must be acknowledged
+  before approval; the evaluation gate counts unusable and silent ("thin") summaries and will not
+  save either as a baseline.
+- Tests: `tests/test_critical_not_hidden.py::test_the_live_answer_is_no_longer_verified`, `tests/test_critical_not_hidden.py::test_a_correction_that_drops_the_urgency_is_not_verified`, `tests/test_api_flow.py::test_critical_report_whose_summaries_only_list_the_values_must_be_acknowledged`, `tests/test_frozen_gate.py::test_summaries_that_list_critical_values_without_saying_so_fail_the_gate`, `tests/test_critical_not_hidden.py::test_an_unreadable_answer_becomes_summary_unavailable_never_an_all_clear`, `tests/test_critical_not_hidden.py::test_the_original_failure_is_no_longer_verified`, `tests/test_critical_not_hidden.py::test_a_placeholder_is_never_verified_and_costs_no_model_call`, `tests/test_critical_not_hidden.py::test_a_correction_that_drops_a_critical_result_is_not_verified_either`, `tests/test_api_flow.py::test_critical_report_with_an_unreadable_summary_is_shown_as_critical_and_unverified`, `tests/test_frozen_gate.py::test_summaries_that_cannot_be_read_fail_the_gate_and_never_become_the_baseline`
+- Residual risk: the completeness check covers CRITICAL lab flags only, not HIGH ones or trends. A
+  summary can name a critical result and still describe it wrongly; that is left to the model audit
+  (H3, H4). Unusual wording for a test can cause a false "not verified", which costs a clinician an
+  acknowledgement and is the safe direction to be wrong in. The urgency and doctor checks look for
+  words, not meaning: "critical" in a sentence that plays the result down would still pass.
+
+## H18 - AI follow-up actions read as treatment orders
+- Severity: major
+- Cause: the summarizer is asked for follow-up actions and, from two lab values alone, writes orders:
+  "Admit the patient ... initiate transfusion", "Start diabetic emergency protocol: IV insulin
+  infusion" (seen live, 2026-11-17). The verifier audits the summaries, not the actions, and the
+  actions are shown to the clinician as a numbered list with no further check.
+- Controls: the prompt asks for suggestions that start with "Consider" and forbids orders to admit,
+  start, give, prescribe or stop treatment, and drug doses. In code, an action whose first word (after
+  "urgently" and similar) is such a verb is found; it is kept as written, so the clinician sees what
+  the model said, and the report carries a warning that must be acknowledged before release. The
+  evaluation gate counts these actions and will not save a baseline that has them.
+- Tests: `tests/test_critical_not_hidden.py::test_treatment_orders_are_found`, `tests/test_critical_not_hidden.py::test_suggestions_and_tests_are_not_orders`, `tests/test_api_flow.py::test_treatment_orders_in_the_actions_are_kept_but_must_be_acknowledged`, `tests/test_frozen_gate.py::test_actions_written_as_treatment_orders_fail_the_gate`
+- Residual risk: the check reads the first word only. "Consider admitting and starting insulin" passes,
+  and so does an order phrased as a noun ("Transfusion of 2 units"). Whether a suggestion is clinically
+  right is not checked at all; that is the clinician's job, which is why every report is reviewed (H2).

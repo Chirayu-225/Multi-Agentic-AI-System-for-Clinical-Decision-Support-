@@ -6,12 +6,128 @@ Replaces the local Phi-3 Mini inference from v1.
 Called by the orchestrator after all tool calls are complete.
 """
 
+import json
+import logging
 import re
 
 from src.llm import generate_text
 
+logger = logging.getLogger("medsight.summarizer")
+
 from src.security.deidentification import redact
 
+
+
+# ── Reading the model's answer ──────────────────────────────────────────────────────────────────
+# The prompt asks for "SECTION: NAME" headers. Models do not all write them the same way (markdown
+# headings, bold, "Clinical Summary:", a JSON object), so the reader accepts those forms. What it
+# must never do is turn an answer it could not read into reassuring text: an empty section becomes
+# "Summary unavailable", which the verifier refuses to mark as verified.
+
+SECTION_NAMES = ("CLINICAL_SUMMARY", "PATIENT_SUMMARY", "FLAG_EXPLANATIONS", "FOLLOWUP_ACTIONS",
+                 "LONGITUDINAL_NARRATIVE")
+UNAVAILABLE_PREFIX = "Summary unavailable"
+UNREADABLE_CLINICAL = (f"{UNAVAILABLE_PREFIX} - the AI's answer could not be read. "
+                       "Review the flagged results in this report directly.")
+UNREADABLE_PATIENT = f"{UNAVAILABLE_PREFIX} - please discuss these results with your doctor."
+NO_ACTIONS = "No follow-up actions were generated. Decide follow-up from the flagged results."
+
+_HEADER = re.compile(
+    r"^[ \t>#*_`=\-]*(?:\d+[.)][ \t]*)?[*_`]*"                 # markdown or numbering around a header
+    r"(?P<prefix>SECTION\b[ \t]*[:\-\u2013\u2014]?[ \t]*)?[*_`]*"
+    r"(?P<name>CLINICAL[ _]SUMMARY|PATIENT[ _]SUMMARY|FLAG[ _]EXPLANATIONS?|"
+    r"FOLLOW[ _\-]?UP[ _]ACTIONS?|LONGITUDINAL[ _]NARRATIVE)"
+    r"[*_`]*[ \t]*(?P<sep>[:\-\u2013\u2014])?[ \t]*[*_`]*[ \t]*(?P<rest>.*)$",
+    re.IGNORECASE | re.MULTILINE)
+_KEY_BY_START = (("CLIN", "CLINICAL_SUMMARY"), ("PAT", "PATIENT_SUMMARY"), ("FLAG", "FLAG_EXPLANATIONS"),
+                 ("FOLLOW", "FOLLOWUP_ACTIONS"), ("LONG", "LONGITUDINAL_NARRATIVE"))
+
+
+def is_placeholder(text: str | None) -> bool:
+    """True for text that stands in for a summary that was never produced."""
+    t = (text or "").strip()
+    return not t or t.startswith(UNAVAILABLE_PREFIX)
+
+
+def _section_key(name: str) -> str:
+    n = name.upper()
+    return next(key for start, key in _KEY_BY_START if n.startswith(start))
+
+
+def _sections_from_json(text: str) -> dict[str, str] | None:
+    t = text.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.DOTALL | re.IGNORECASE)
+    if fence:
+        t = fence.group(1).strip()
+    if not t.startswith("{"):
+        return None
+    try:
+        data = json.loads(t)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: dict[str, str] = {}
+    for raw_key, value in data.items():
+        m = _HEADER.match(str(raw_key).replace("_", " "))
+        if not m:
+            continue
+        if isinstance(value, dict):
+            value = "\n".join(f"{k}: {v}" for k, v in value.items())
+        elif isinstance(value, list):
+            value = "\n".join(f"{i}. {v}" for i, v in enumerate(value, 1))
+        out.setdefault(_section_key(m.group("name")), str(value or "").strip())
+    return out or None
+
+
+def split_sections(text: str) -> dict[str, str]:
+    """The answer's sections by name. Missing or unreadable sections are simply absent."""
+    text = text or ""
+    from_json = _sections_from_json(text)
+    if from_json is not None:
+        return from_json
+    headers = []
+    for m in _HEADER.finditer(text):
+        rest = re.sub(r"[*_`#]", "", m.group("rest")).strip()
+        # A line is a header if it says SECTION, ends in a colon, or is nothing but the name.
+        # That keeps a sentence which merely starts with "Patient summary of ..." in the body.
+        if m.group("prefix") or m.group("sep") == ":" or not rest:
+            headers.append((m, rest))
+    out: dict[str, str] = {}
+    for i, (m, rest) in enumerate(headers):
+        end = headers[i + 1][0].start() if i + 1 < len(headers) else len(text)
+        body = (rest + "\n" + text[m.end():end]).strip()
+        body = re.sub(r"\n[ \t]*[-=*_]{3,}[ \t]*$", "", body).strip()      # a trailing markdown rule
+        key = _section_key(m.group("name"))
+        if body and not out.get(key):
+            out[key] = body
+    return out
+
+
+# ── Follow-up actions are suggestions, not orders ───────────────────────────────────────────────
+# The actions are not audited by the verifier and go straight to the clinician. A model once wrote
+# "Admit the patient ... initiate transfusion" and "Start diabetic emergency protocol: IV insulin
+# infusion" for a report whose only facts were two lab values. They are not rewritten here (that
+# would hide what the model said); they are found, and the report carries a warning the clinician
+# must acknowledge before release (SAFETY.md H18).
+
+_ORDER_VERBS = {"admit", "start", "initiate", "begin", "commence", "administer", "give", "prescribe",
+                "transfuse", "infuse", "inject", "stop", "discontinue", "titrate", "hospitalise",
+                "hospitalize", "intubate"}
+_LEADING_ADVERBS = {"urgently", "immediately", "promptly", "please", "now"}
+
+
+def directive_actions(actions: list[str]) -> list[str]:
+    """The actions that read as treatment orders: their first word (after an adverb such as
+    "urgently") is a verb like admit, start, give or prescribe. "Consider starting ..." is fine."""
+    out = []
+    for a in actions or []:
+        words = re.findall(r"[a-z]+", (a or "").lower())
+        while words and words[0] in _LEADING_ADVERBS:
+            words = words[1:]
+        if words and words[0] in _ORDER_VERBS:
+            out.append(a)
+    return out
 
 
 def _build_context(entities: dict, flags: list, trend_flags: list,
@@ -106,17 +222,26 @@ ABNORMAL FLAGS TO EXPLAIN:
 
 ---
 SECTION: CLINICAL_SUMMARY
-Write a concise clinical summary (150 words max) for a GP. Only use values from the data above.
+Write a clinical summary for a GP in 2 to 4 sentences (150 words max). For every CRITICAL or HIGH
+result, give its value, say whether it is low or high, and say how urgent it is (for example "needs
+same-day review"). Only use values from the data above. Do not name a cause or a diagnosis that is
+not in the data.
 
 SECTION: PATIENT_SUMMARY
-Explain results to the patient in plain language (100 words max). Simple, honest, not alarming.
+Explain the results to the patient in plain language (100 words max). Be honest and calm. Never say
+the results are fine or normal when any result is flagged. If any result is CRITICAL, say clearly
+that it needs attention and that they should contact their doctor today.
 
 SECTION: FLAG_EXPLANATIONS
-For each FLAG_N above, write one sentence explanation referencing the ICMR guideline and recommended action.
+For each FLAG_N above, write one sentence explaining it with reference to the ICMR guideline and
+what a clinician should consider next.
 Format: FLAG_0: <explanation>
 
 SECTION: FOLLOWUP_ACTIONS
-List 3 specific numbered follow-up actions for the GP based on the findings.
+List 3 numbered follow-up actions for the GP to consider, based on the findings. Write each one as
+a suggestion that starts with "Consider" (for example "Consider same-day review of ..."). Do not
+write orders to admit, start, give, prescribe or stop a treatment, and do not give drug doses: the
+clinician decides treatment.
 
 SECTION: LONGITUDINAL_NARRATIVE
 {"Write a short (80 words max) narrative tracing this patient's trajectory across visits, "
@@ -182,21 +307,23 @@ async def generate_summaries(
         print(f"[SUMMARIZER] Error: {type(e).__name__}")
         return unavailable("")
 
-    def _extract_section(section_name: str) -> str:
-        pattern = rf"SECTION: {section_name}\n(.*?)(?=SECTION:|$)"
-        m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        return m.group(1).strip() if m else ""
-
-    clinical   = _extract_section("CLINICAL_SUMMARY")
-    patient    = _extract_section("PATIENT_SUMMARY")
-    flag_exps  = _extract_section("FLAG_EXPLANATIONS")
-    followup   = _extract_section("FOLLOWUP_ACTIONS")
-    narrative  = _extract_section("LONGITUDINAL_NARRATIVE")
+    sections = split_sections(text)
+    clinical   = sections.get("CLINICAL_SUMMARY", "")
+    patient    = sections.get("PATIENT_SUMMARY", "")
+    flag_exps  = sections.get("FLAG_EXPLANATIONS", "")
+    followup   = sections.get("FOLLOWUP_ACTIONS", "")
+    narrative  = sections.get("LONGITUDINAL_NARRATIVE", "")
+    if re.fullmatch(r"[\W_]*N/?A[\W_]*", narrative, re.IGNORECASE):
+        narrative = ""
+    if not clinical or not patient:
+        # Sizes and section names only: the text itself can contain lab values.
+        logger.warning("Summarizer answer was not fully readable: %d chars, sections found: %s",
+                       len(text or ""), sorted(sections) or "none")
 
     # Parse flag explanations
     explained = []
     for i, f in enumerate(abnormal):
-        m = re.search(rf"FLAG_{i}:\s*(.+)", flag_exps)
+        m = re.search(rf"FLAG[ _]?{i}\b[*_`]*\s*[:\-\u2013]\s*[*_`]*\s*(.+)", flag_exps, re.IGNORECASE)
         explained.append({**f, "explanation": re.sub(r"\*\*|__", "", m.group(1)).strip() if m else ""})
 
     # Parse follow-up actions
@@ -209,15 +336,18 @@ async def generate_summaries(
     actions = [
         _plain(line)
         for line in followup.split("\n")
-        if line.strip() and (line.strip()[0].isdigit() or line.strip().startswith("-"))
+        if line.strip() and (line.strip()[0].isdigit() or line.strip().startswith(("-", "*", "\u2022")))
     ]
     actions = [a for a in actions if a]
     if not actions:
-        actions = [followup] if followup else ["Routine monitoring recommended."]
+        # Never invent a recommendation. "Routine monitoring" used to appear here, including under
+        # a report whose flags were critical.
+        actions = [_plain(followup)] if followup else [NO_ACTIONS]
 
     return {
-        "clinical_summary": clinical or "No significant findings to summarize.",
-        "patient_summary": patient or "Your results have been reviewed.",
+        # An empty section is a failed answer, not a clean bill of health.
+        "clinical_summary": clinical or UNREADABLE_CLINICAL,
+        "patient_summary": patient or UNREADABLE_PATIENT,
         "explained_flags": explained,
         "followup_actions": actions,
         # Only surface a narrative when there's actually a trend to narrate —

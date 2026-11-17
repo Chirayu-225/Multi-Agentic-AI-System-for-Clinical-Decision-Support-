@@ -14,7 +14,7 @@ def _numbers(text):
     return {float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)}
 
 
-def make_generate(catch=True, garbage=False, calls=None):
+def make_generate(catch=True, garbage=False, calls=None, empty_summaries=False, bare=False, orders=False):
     """A fake model. As verifier: FAILs a summary holding a number the ground truth lacks.
     As summarizer: returns grounded text."""
     async def generate(prompt, **kw):
@@ -28,10 +28,21 @@ def make_generate(catch=True, garbage=False, calls=None):
             bad = catch and bool(_numbers(clinical) - _numbers(ground))
             return json.dumps({"clinical": {"verdict": "FAIL" if bad else "PASS",
                                             "issues": ["novel value"] if bad else [],
-                                            "corrected": "corrected text" if bad else None},
+                                            # a real correction keeps the findings; it only fixes the claim
+                                            "corrected": ("Corrected: " + clinical.strip()) if bad else None},
                                "patient": {"verdict": "PASS", "issues": [], "corrected": None}})
-        return ("SECTION: CLINICAL_SUMMARY\nValues reviewed.\nSECTION: PATIENT_SUMMARY\nResults reviewed.\n"
-                "SECTION: FLAG_EXPLANATIONS\nSECTION: FOLLOWUP_ACTIONS\n1. Review.\nSECTION: LONGITUDINAL_NARRATIVE\nN/A")
+        if empty_summaries:
+            return "I am unable to format that."
+        # a realistic summary: it repeats the abnormal results it was given
+        findings = " ".join(line.strip() for line in prompt.splitlines() if line.startswith("  ["))
+        if bare:
+            # the values only, as Groq wrote them: no "critical", no "contact your doctor"
+            findings = " ".join(f"{name} is {value}." for name, value in
+                                re.findall(r"^  \[\w+\] ([^:]+): ([\d.]+)", prompt, re.MULTILINE))
+        patient = "Here are your values." if bare else "Some results need attention; please contact your doctor."
+        action = "Admit the patient and start treatment." if orders else "Consider review."
+        return (f"SECTION: CLINICAL_SUMMARY\nValues reviewed. {findings}\nSECTION: PATIENT_SUMMARY\n{patient}\n"
+                f"SECTION: FLAG_EXPLANATIONS\nSECTION: FOLLOWUP_ACTIONS\n1. {action}\nSECTION: LONGITUDINAL_NARRATIVE\nN/A")
     return generate
 
 
@@ -258,3 +269,47 @@ def test_cli_exit_code_for_an_off_model_run(monkeypatch, capsys):
     monkeypatch.setattr(gate, "run_gate", fake_run_gate)
     assert gate.main([]) == 4
     assert "OFF-MODEL RUN" in capsys.readouterr().out
+
+
+def test_summaries_that_cannot_be_read_fail_the_gate_and_never_become_the_baseline(paths):
+    """Before this, an empty summary scored 0.0 ungrounded - a perfect result for producing nothing."""
+    report = run(paths, generate=make_generate(empty_summaries=True), update_baseline=True)
+    assert report["metrics"]["summarizer.unusable_rate"] == 1.0
+    assert report["metrics"]["summarizer.ungrounded_rate"] == 0.0        # the old, blind measure
+    assert report["status"] == "regression" and "unusable_rate" in report["regressions"][0]
+    assert report["baseline_updated"] is False and not paths["baseline_path"].exists()
+
+
+def test_complete_summaries_score_zero_unusable(paths):
+    report = run(paths)
+    assert report["metrics"]["summarizer.unusable_rate"] == 0.0 and report["status"] == "pass"
+
+
+def test_an_old_baseline_without_the_new_measure_still_gets_the_absolute_check(paths):
+    paths["baseline_path"].write_text(json.dumps({
+        "model": "OLD", "prompt_versions": STATE["prompt_versions"],
+        "metrics": {"verifier.catch_rate": 1.0, "verifier.false_alarm_rate": 0.0,
+                    "verifier.unverified_rate": 0.0, "summarizer.ungrounded_rate": 0.0}}), encoding="utf-8")
+    report = run(paths, generate=make_generate(empty_summaries=True), force_all=True)
+    assert report["status"] == "regression" and "unusable_rate" in report["regressions"][0]
+
+
+def test_summaries_that_list_critical_values_without_saying_so_fail_the_gate(paths):
+    """What the real model wrote on 2026-11-17: every value present, nothing said about urgency."""
+    report = run(paths, generate=make_generate(bare=True), update_baseline=True)
+    assert report["metrics"]["summarizer.unusable_rate"] == 0.0          # nothing is missing...
+    assert report["metrics"]["summarizer.thin_rate"] == 0.5               # ...the two critical cases are silent
+    assert report["status"] == "regression" and "thin_rate" in report["regressions"][0]
+    assert report["baseline_updated"] is False
+
+
+def test_actions_written_as_treatment_orders_fail_the_gate(paths):
+    report = run(paths, generate=make_generate(orders=True), update_baseline=True)
+    assert report["metrics"]["actions.directive_rate"] == 1.0
+    assert report["status"] == "regression" and "directive_rate" in report["regressions"][0]
+    assert report["baseline_updated"] is False
+
+
+def test_good_summaries_score_zero_on_every_content_measure(paths):
+    m = run(paths)["metrics"]
+    assert m["summarizer.thin_rate"] == 0.0 and m["actions.directive_rate"] == 0.0

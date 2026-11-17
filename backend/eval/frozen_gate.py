@@ -50,6 +50,22 @@ METRICS = {
     "verifier.false_alarm_rate": ("down", "verifier"),
     "verifier.unverified_rate": ("down", "verifier"),
     "summarizer.ungrounded_rate": ("down", "summarizer"),
+    # A summary that was never produced, or that leaves out a critical result. Without this the
+    # gate scored an empty summary as perfect: nothing in it, so nothing ungrounded.
+    "summarizer.unusable_rate": ("down", "summarizer"),
+    # Complete but silent: the critical values are listed, yet the clinical summary never says they are
+    # critical or urgent, or the patient summary never says to contact the doctor (SAFETY.md H17).
+    "summarizer.thin_rate": ("down", "summarizer"),
+    # Follow-up actions written as treatment orders ("Admit ...", "Start IV insulin") (SAFETY.md H18).
+    "actions.directive_rate": ("down", "summarizer"),
+}
+
+# Rates that fail a run on their own, whatever the baseline says: a bad baseline must never be saved.
+ABSOLUTE = {
+    "summarizer.unusable_rate": "were missing or left out a critical result",
+    "summarizer.thin_rate": "did not say a critical result was urgent, or did not tell the patient to contact "
+                            "their doctor",
+    "actions.directive_rate": "had follow-up actions worded as treatment orders",
 }
 
 
@@ -217,7 +233,9 @@ async def measure_verifier(frozen: dict, generate, check=lambda: None) -> dict:
                                                         c["entities"], c["flags"], [])
                 check()
                 total += 1
-                if out["clinical_unverified"]:
+                # The audit is scored on its own: the code checks for urgency and doctor advice
+                # (verifier.check_summaries) are measured on the summarizer below, not here.
+                if out.get("clinical_audit_unverified", out["clinical_unverified"]):
                     unverified += 1
                 elif out["clinical_corrected"]:
                     if kind == "novel":
@@ -233,10 +251,11 @@ async def measure_verifier(frozen: dict, generate, check=lambda: None) -> dict:
 
 async def measure_summarizer(frozen: dict, generate, check=lambda: None) -> dict:
     import src.agents.summarizer as summarizer
+    from src.agents.verifier import NO_DOCTOR_ADVICE, NO_URGENCY, check_summaries
     from src.evidence.grounding import collect_allowed_numbers, find_ungrounded_numbers
     original = summarizer.generate_text
     summarizer.generate_text = generate
-    bad = 0
+    bad = unusable = thin = directive = 0
     cases = frozen["cases"][:N_SUMMARY_CASES]
     try:
         for c in cases:
@@ -245,9 +264,19 @@ async def measure_summarizer(frozen: dict, generate, check=lambda: None) -> dict
             allowed = collect_allowed_numbers(c["entities"], c["flags"], [], [], [], [], [])
             bad += bool(find_ungrounded_numbers(out["clinical_summary"], allowed)
                         or find_ungrounded_numbers(out["patient_summary"], allowed))
+            checked = check_summaries(out["clinical_summary"], out["patient_summary"], c["flags"])
+            reasons = {checked["clinical"], checked["patient"]} - {None}
+            if reasons - {NO_URGENCY, NO_DOCTOR_ADVICE}:
+                unusable += 1                              # not produced, or a critical result left out
+            elif reasons:
+                thin += 1
+            directive += bool(summarizer.directive_actions(out["followup_actions"]))
     finally:
         summarizer.generate_text = original
-    return {"summarizer.ungrounded_rate": round(bad / len(cases), 4)}
+    return {"summarizer.ungrounded_rate": round(bad / len(cases), 4),
+            "summarizer.unusable_rate": round(unusable / len(cases), 4),
+            "summarizer.thin_rate": round(thin / len(cases), 4),
+            "actions.directive_rate": round(directive / len(cases), 4)}
 
 
 def compare(baseline_metrics: dict, new_metrics: dict, tolerance_cases: int) -> list[str]:
@@ -326,7 +355,14 @@ async def run_gate(*, generate, frozen_path=FROZEN_PATH, baseline_path=BASELINE_
             report["baseline_updated"] = False
         return report
 
-    problems = compare((baseline or {}).get("metrics", {}), metrics, _env_int("GATE_TOLERANCE_CASES", 1))
+    tolerance = _env_int("GATE_TOLERANCE_CASES", 1)
+    problems = compare((baseline or {}).get("metrics", {}), metrics, tolerance)
+    # Not relative to a baseline: summaries that are missing or incomplete are a failure on their
+    # own, and must never become the baseline that later runs are compared against.
+    for name, what in reversed(ABSOLUTE.items()):
+        bad_cases = round(metrics.get(name, 0) * N_SUMMARY_CASES)
+        if bad_cases > tolerance:
+            problems.insert(0, f"{name}: {bad_cases} of {N_SUMMARY_CASES} cases {what} (allowed {tolerance})")
     report["regressions"] = problems
     report["status"] = "regression" if problems else "pass"
     if update_baseline and not problems:

@@ -580,3 +580,127 @@ def test_suite_ignores_developer_dotenv():
     """A real backend/.env must never leak into the test run (it broke 3 auth tests on Windows)."""
     import os
     assert os.environ["MEDSIGHT_SKIP_DOTENV"] == "1"
+
+
+# ── A critical report whose AI summary failed: what the clinician is actually shown ───────────
+
+def _critical_upload(client, monkeypatch, summarizer_answer):
+    """The whole upload path with the REAL summarizer and verifier on a report with two critical
+    values. Only the model's text is faked: `summarizer_answer` for the summary, PASS for the audit."""
+    import json as _json
+    import src.agents.summarizer as summarizer_mod
+    import src.agents.verifier as verifier_mod
+    monkeypatch.setitem(ENTITIES, "lab_values", [{"test": "Hemoglobin", "value": 6.2, "unit": "g/dL"},
+                                                 {"test": "Glucose (fasting)", "value": 540, "unit": "mg/dL"}])
+    monkeypatch.setitem(ENTITIES, "patient", {"name": "Priya Sharma", "age": "42", "gender": "Male"})
+
+    async def summarizer_model(prompt, **kw):
+        return summarizer_answer
+
+    async def verifier_model(prompt, **kw):
+        ok = {"verdict": "PASS", "issues": [], "corrected": None}
+        return _json.dumps({"clinical": ok, "patient": ok})
+
+    monkeypatch.setattr(summarizer_mod, "generate_text", summarizer_model)
+    monkeypatch.setattr(verifier_mod, "generate_text", verifier_model)
+    monkeypatch.setattr(main, "generate_summaries", summarizer_mod.generate_summaries)
+    monkeypatch.setattr(main, "verify_and_correct", verifier_mod.verify_and_correct)
+    h = login(client, CLIN)
+    r = upload(client, h)
+    assert r.status_code == 200, r.text
+    return h, r.json()
+
+
+def test_critical_report_with_an_unreadable_summary_is_shown_as_critical_and_unverified(client, monkeypatch):
+    h, body = _critical_upload(client, monkeypatch, "Sure! Here is what I found.")
+    # the banner is recomputed from the flags (the fake orchestrator stored "HIGH")
+    assert body["risk_summary"]["overall_severity"] == "Severity.CRITICAL"
+    assert body["risk_summary"]["critical_count"] == 2 and body["has_critical"] is True
+    out = body["llm_output"]
+    assert out["clinical_summary"].startswith("Summary unavailable")
+    assert out["verification"]["clinical_unverified"] and out["verification"]["patient_unverified"]
+    shown = str(out).lower()
+    assert "no significant findings" not in shown and "routine monitoring" not in shown
+    assert any(w.startswith("AI summary:") for w in body["ingestion_warnings"])
+    # and it cannot be approved with one click
+    r = client.post(f"/report/{body['report_id']}/review", headers=h, json={"decision": "approve"})
+    assert r.status_code == 409
+    assert any("NOT verified" in w for w in r.json()["detail"]["warnings"])
+
+
+def test_critical_report_whose_summary_ignores_the_critical_values_is_unverified(client, monkeypatch):
+    h, body = _critical_upload(client, monkeypatch,
+                               "SECTION: CLINICAL_SUMMARY\nNo significant findings to summarize.\n"
+                               "SECTION: PATIENT_SUMMARY\nYour results look fine.\n"
+                               "SECTION: FOLLOWUP_ACTIONS\n1. Routine monitoring.")
+    assert body["llm_output"]["verification"]["clinical_unverified"] is True
+    warning = next(w for w in body["ingestion_warnings"] if w.startswith("AI summary:"))
+    assert "Hemoglobin" in warning and "Glucose (fasting)" in warning
+
+
+def test_critical_report_with_a_complete_summary_is_verified(client, monkeypatch):
+    h, body = _critical_upload(client, monkeypatch,
+                               "## SECTION: CLINICAL_SUMMARY\nHemoglobin 6.2 g/dL and fasting glucose 540 mg/dL "
+                               "are both critical.\n\n## SECTION: PATIENT_SUMMARY\nTwo results need urgent "
+                               "attention; please contact your doctor today.\n\n## SECTION: FOLLOWUP_ACTIONS\n"
+                               "1. Consider same-day clinical review.")
+    v = body["llm_output"]["verification"]
+    assert not v["clinical_unverified"] and not v["patient_unverified"]
+    assert not [w for w in body["ingestion_warnings"] if w.startswith(("AI summary:", "AI follow-up"))]
+    assert body["risk_summary"]["overall_severity"] == "Severity.CRITICAL"
+
+
+def test_a_report_stored_before_the_fix_is_shown_with_the_right_level(client, monkeypatch):
+    """Rows already in the database hold a risk summary that ignored the lab flags."""
+    h, body = _critical_upload(client, monkeypatch,
+                               "SECTION: CLINICAL_SUMMARY\nHemoglobin 6.2 g/dL, glucose 540 mg/dL.\n"
+                               "SECTION: PATIENT_SUMMARY\nTwo results need attention.")
+    from src.db.models import Report
+    db = SessionLocal()
+    try:
+        row = db.query(Report).filter(Report.id == body["report_id"]).first()
+        row.risk_summary = {"overall_severity": "Severity.NORMAL", "color": "green", "critical_count": 0,
+                            "high_count": 0, "total_flags": 2}
+        db.commit()
+    finally:
+        db.close()
+    again = client.get(f"/report/{body['report_id']}", headers=h).json()
+    assert again["risk_summary"]["overall_severity"] == "Severity.CRITICAL"
+    assert again["risk_summary"]["color"] == "red" and again["risk_summary"]["critical_count"] == 2
+    queue = client.get("/reviews/pending", headers=h).json()["reports"]
+    assert queue[0]["report_id"] == body["report_id"] and queue[0]["overall_severity"] == "Severity.CRITICAL"
+
+
+def test_critical_report_whose_summaries_only_list_the_values_must_be_acknowledged(client, monkeypatch):
+    """The live Groq answer of 2026-11-17: both values named, nothing said about them."""
+    h, body = _critical_upload(client, monkeypatch,
+                               "SECTION: CLINICAL_SUMMARY\nA 54-year-old male has a hemoglobin of 6.2 g/dL and a "
+                               "glucose level of 540 mg/dL.\nSECTION: PATIENT_SUMMARY\nYour hemoglobin is 6.2 g/dL "
+                               "and your glucose is 540 mg/dL.\nSECTION: FOLLOWUP_ACTIONS\n1. Consider review.")
+    v = body["llm_output"]["verification"]
+    assert v["clinical_unverified"] and v["patient_unverified"]
+    warnings = [w for w in body["ingestion_warnings"] if w.startswith("AI summary:")]
+    assert any("critical or urgent" in w for w in warnings)
+    assert any("contact their doctor" in w for w in warnings)
+    r = client.post(f"/report/{body['report_id']}/review", headers=h, json={"decision": "approve"})
+    assert r.status_code == 409 and any("NOT verified" in w for w in r.json()["detail"]["warnings"])
+
+
+def test_treatment_orders_in_the_actions_are_kept_but_must_be_acknowledged(client, monkeypatch):
+    """SAFETY.md H18: the actions are not rewritten (the clinician sees what the model said), but the
+    report cannot be released until someone has accepted that they are suggestions only."""
+    h, body = _critical_upload(client, monkeypatch,
+                               "SECTION: CLINICAL_SUMMARY\nHemoglobin 6.2 g/dL and glucose 540 mg/dL are critical; "
+                               "same-day review.\nSECTION: PATIENT_SUMMARY\nTwo results need attention; contact "
+                               "your doctor today.\nSECTION: FOLLOWUP_ACTIONS\n1. Admit the patient and initiate "
+                               "transfusion.\n2. Start IV insulin infusion.\n3. Order an HbA1c.")
+    out = body["llm_output"]
+    assert out["followup_actions"][0].startswith("Admit the patient")           # kept as written
+    assert len(out["verification"]["directive_actions"]) == 2
+    warning = next(w for w in body["ingestion_warnings"] if w.startswith("AI follow-up actions:"))
+    assert "2 of them read as treatment orders" in warning
+    r = client.post(f"/report/{body['report_id']}/review", headers=h, json={"decision": "approve"})
+    assert r.status_code == 409
+    r = client.post(f"/report/{body['report_id']}/review", headers=h,
+                    json={"decision": "approve", "acknowledge_warnings": True})
+    assert r.status_code == 200, r.text

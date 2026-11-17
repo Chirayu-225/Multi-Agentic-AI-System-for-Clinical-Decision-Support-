@@ -32,6 +32,22 @@ class Severity(str, Enum):
     NORMAL   = "NORMAL"
 
 
+def normalize_severity(value) -> "Severity | None":
+    """Read a severity in any form it takes in this codebase: the enum, its value ("CRITICAL"),
+    or str(enum) ("Severity.CRITICAL", which is what the tool layer and every stored report hold).
+    Returns None for anything else, so the caller has to decide what an unreadable severity means
+    instead of it quietly comparing unequal to everything."""
+    if isinstance(value, Severity):
+        return value
+    text = str(value or "").strip().upper()
+    if text.startswith("SEVERITY."):
+        text = text[len("SEVERITY."):]
+    try:
+        return Severity(text)
+    except ValueError:
+        return None
+
+
 # Load ICMR reference ranges
 _REF_PATH = Path(__file__).parent / "icmr_reference_ranges.json"
 with open(_REF_PATH) as f:
@@ -736,13 +752,21 @@ def compute_risk_summary(
     """
     Aggregate all flags into a top-level risk summary.
     `baseline_flags` (Layer 3, personal-deviation) is optional/backward-compatible.
+
+    Severities are normalised first. They arrive here as "Severity.CRITICAL" strings (the tool
+    layer stringifies them), and comparing those to the enum directly is always False: every
+    lab flag then counted as nothing and a report with critical values was summarised as NORMAL.
+    A severity that cannot be read at all is never treated as normal: it is counted in
+    `unrecognized_severity_count` and holds the overall level at MODERATE or above.
     """
     baseline_flags = baseline_flags or []
+    rule_sev = [normalize_severity(f.get("severity")) for f in rule_flags]
     all_severities = (
-        [f["severity"] for f in rule_flags]
-        + [f["severity"] for f in trend_flags]
-        + [f["severity"] for f in baseline_flags]
+        rule_sev
+        + [normalize_severity(f.get("severity")) for f in trend_flags]
+        + [normalize_severity(f.get("severity")) for f in baseline_flags]
     )
+    unrecognized = sum(1 for sev in all_severities if sev is None)
 
     if Severity.CRITICAL in all_severities:
         overall = Severity.CRITICAL
@@ -750,15 +774,15 @@ def compute_risk_summary(
     elif Severity.HIGH in all_severities:
         overall = Severity.HIGH
         color = "orange"
-    elif Severity.MODERATE in all_severities:
+    elif Severity.MODERATE in all_severities or unrecognized:
         overall = Severity.MODERATE
         color = "yellow"
     else:
         overall = Severity.NORMAL
         color = "green"
 
-    critical_flags = [f for f in rule_flags if f["severity"] == Severity.CRITICAL]
-    high_flags = [f for f in rule_flags if f["severity"] == Severity.HIGH]
+    critical_flags = [f for f, sev in zip(rule_flags, rule_sev) if sev == Severity.CRITICAL]
+    high_flags = [f for f, sev in zip(rule_flags, rule_sev) if sev == Severity.HIGH]
 
     return {
         "overall_severity": overall,
@@ -768,6 +792,7 @@ def compute_risk_summary(
         "high_count": len(high_flags),
         "trend_count": len(trend_flags),
         "baseline_count": len(baseline_flags),
-        "critical_tests": [f["test"] for f in critical_flags],
+        "critical_tests": [f.get("test") for f in critical_flags],
+        "unrecognized_severity_count": unrecognized,
         "requires_immediate_attention": overall == Severity.CRITICAL,
     }

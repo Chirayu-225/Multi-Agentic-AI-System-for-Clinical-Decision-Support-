@@ -52,9 +52,10 @@ from src.ingestion.document_loader import (
     load_document, ALLOWED_EXTS, PDF_EXTS, sniff_file_type, extension_matches_content,
 )
 from src.agents.orchestrator import run_orchestrator
+from src.flagging.risk_flagging import compute_risk_summary
 from src import ai_quality, outbox, prompts
 from src.llm import begin_call_tracking, begin_model_tracking, llm_unavailable_for, required_key_name
-from src.agents.summarizer import generate_summaries
+from src.agents.summarizer import directive_actions, generate_summaries, is_placeholder
 from src.agents.verifier import verify_and_correct
 from src.agents.translator import (LANGUAGES, is_supported, translate_patient_summary)
 from src.tools.history_store import (store_report as chroma_store, delete_patient_history,
@@ -782,6 +783,19 @@ def _effective_status(r: Report) -> str:
     return r.review_status or "pending_review"   # NULL (legacy rows) fails closed
 
 
+def _risk_summary_of(r: Report) -> dict:
+    """The risk summary to SHOW for a report: always recomputed from the report's stored flags.
+    The stored copy is derived data, and reports saved before the severity fix hold a summary
+    that ignored every lab flag (a critical report stored as NORMAL). Recomputing on read puts
+    those right without a migration and keeps the banner and the flag list from ever disagreeing.
+    A row with no stored flags at all (very old) falls back to what was stored."""
+    stored = r.risk_summary or {}
+    if r.rule_flags is None and r.trend_flags is None and r.baseline_flags is None:
+        return stored
+    fresh = compute_risk_summary(r.rule_flags or [], r.trend_flags or [], r.baseline_flags or [])
+    return {**stored, **fresh, "overall_severity": str(fresh["overall_severity"])}
+
+
 def _iso(dt) -> str | None:
     return dt.isoformat() if dt else None
 
@@ -805,7 +819,7 @@ def _report_full(r: Report, db: Session) -> dict:
         "entities": r.entities or {}, "rule_flags": r.rule_flags or [],
         "trend_flags": r.trend_flags or [], "baseline_flags": r.baseline_flags or [],
         "forecast_flags": r.forecast_flags or [], "similar_history": r.similar_history or [],
-        "risk_summary": r.risk_summary or {}, "pubmed_references": pubmed,
+        "risk_summary": _risk_summary_of(r), "pubmed_references": pubmed,
         "drug_safety": drug_safety, "drug_interactions": r.drug_interactions or {},
         "ingestion_warnings": r.ingestion_warnings or [],
         "security_warnings": r.security_warnings or [],
@@ -831,6 +845,7 @@ def _report_full(r: Report, db: Session) -> dict:
                 "patient_summary_corrected": ver.get("patient_corrected", False),
                 "clinical_unverified": ver.get("clinical_unverified", False),
                 "patient_unverified": ver.get("patient_unverified", False),
+                "directive_actions": ver.get("directive_actions", []),
             },
         },
         "agent_metadata": {
@@ -855,8 +870,8 @@ def _report_patient_view(r: Report) -> dict:
         "filename": r.filename,
         "review": {"status": _effective_status(r), "reviewed_by": r.reviewed_by,
                    "reviewed_at": _iso(r.reviewed_at)},
-        "risk_summary": {"overall_severity": (r.risk_summary or {}).get("overall_severity"),
-                         "color": (r.risk_summary or {}).get("color")},
+        "risk_summary": {"overall_severity": _risk_summary_of(r).get("overall_severity"),
+                         "color": _risk_summary_of(r).get("color")},
         "patient_summary": r.patient_summary,
         "patient_summary_translated": ({"language": r.translation_language,
                                         "text": r.patient_summary_translated}
@@ -1216,9 +1231,21 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
                     f"{label} contains number(s) not found in the extracted data: {', '.join(bad)}"
                 )
 
+        # A summary that was never produced, leaves out a critical result, or does not say it is urgent
+        # is said in plain words at the top of the report, not only as a missing "verified" badge.
+        for issue in verified.get("content_issues", []):
+            ingestion_warnings.append(f"AI summary: {issue}")
+        # Follow-up actions are not audited by the verifier. Ones worded as treatment orders are
+        # kept as written (so the clinician sees what the model said) and flagged (SAFETY.md H18).
+        orders = directive_actions(summaries.get("followup_actions", []))
+        if orders:
+            ingestion_warnings.append(
+                f"AI follow-up actions: {len(orders)} of them read as treatment orders, not suggestions "
+                f"(\"{orders[0][:80]}\"). They are AI suggestions only; treatment is the clinician's decision.")
+
         # ── Step 4c: optional translation of the (audited) patient summary ─
         translation = None
-        if language != "en":
+        if language != "en" and not is_placeholder(verified["patient_summary"]):
             ws_callback({"type": "translating", "language": language})
             translation = await translate_patient_summary(verified["patient_summary"], language)
             llm_calls += 1
@@ -1290,6 +1317,9 @@ async def _process_upload(job: jobq.JobSnapshot, report_progress) -> None:
             "patient_unverified": verified.get("patient_unverified", False),
             "clinical_issues": verified.get("clinical_issues", ""),
             "patient_issues": verified.get("patient_issues", ""),
+            "clinical_missing_critical": verified.get("clinical_missing_critical", []),
+            "content_issues": verified.get("content_issues", []),
+            "directive_actions": orders,
         }
         # The preliminary row (saved earlier in this attempt or in a deferred one) is replaced in
         # place: same id, original timestamp.
@@ -1407,7 +1437,13 @@ def _review_warnings(r: Report) -> list[str]:
     ver = r.verification or {}
     out = []
     if ver.get("clinical_unverified") or ver.get("patient_unverified"):
-        out.append("The AI Verifier could not run: the summaries have NOT been audited.")
+        if (ver.get("clinical_missing_critical") or ver.get("content_issues")
+                or is_placeholder(r.clinical_summary) or is_placeholder(r.patient_summary)):
+            # The verifier ran (or had nothing to run on); the reason is in the AI-summary warning below.
+            out.append("The AI summaries are NOT verified: one is missing, incomplete, or leaves out "
+                       "a critical result.")
+        else:
+            out.append("The AI Verifier could not run: the summaries have NOT been audited.")
     out += [f"Grounding: {w}" for w in (r.grounding_warnings or [])]
     out += [f"Security: {w}" for w in (r.security_warnings or [])]
     out += [f"Extraction: {w}" for w in (r.ingestion_warnings or [])]
@@ -1506,7 +1542,7 @@ def pending_reviews(db: Session = Depends(get_db),
         "analysis_status": r.analysis_status or "complete", "has_critical": bool(r.has_critical),
         "report_id": r.id, "patient_id": r.patient_id, "filename": r.filename,
         "report_date": r.report_date, "created_at": _iso(r.created_at),
-        "overall_severity": (r.risk_summary or {}).get("overall_severity"),
+        "overall_severity": _risk_summary_of(r).get("overall_severity"),
         "security_warnings": len(r.security_warnings or []),
         "grounding_warnings": len(r.grounding_warnings or []),
         "interaction_alerts": len((r.drug_interactions or {}).get("interactions", [])),
@@ -1542,7 +1578,7 @@ def export_pending_reviews_pdf(request: Request, include_names: bool = False,
             "patient_id": r.patient_id, "report_date": r.report_date,
             "created_at": r.created_at.strftime("%d %b %Y %H:%M") if r.created_at else None,
             "filename": r.filename if include_names else None,
-            "overall_severity": (r.risk_summary or {}).get("overall_severity"),
+            "overall_severity": _risk_summary_of(r).get("overall_severity"),
             "flags": flags,
             "interactions": (r.drug_interactions or {}).get("interactions", []),
             "warnings": [clean(w) for w in _review_warnings(r)],
@@ -1650,7 +1686,7 @@ def patient_history(patient_id: str, request: Request, db: Session = Depends(get
                 "report_id": r.id,
                 "filename": r.filename,
                 "report_date": r.report_date,
-                "risk_summary": r.risk_summary,
+                "risk_summary": _risk_summary_of(r),
                 "lab_values": r.lab_values,
                 "review_status": _effective_status(r),
                 "diagnoses": r.entities.get("clinical", {}).get("diagnoses", []) if r.entities else [],
@@ -1679,7 +1715,7 @@ def my_reports(db: Session = Depends(get_db),
     reports = _visible_reports(principal, principal.patient_id, db)
     return {"patient_id": principal.patient_id, "reports": [{
         "report_id": r.id, "report_date": r.report_date, "filename": r.filename,
-        "overall_severity": (r.risk_summary or {}).get("overall_severity"),
+        "overall_severity": _risk_summary_of(r).get("overall_severity"),
     } for r in reports]}
 
 
