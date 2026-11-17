@@ -4,7 +4,7 @@
     "seed": 42,
     "data": "synthetic (seeded), no real patient data",
     "live_verifier": false,
-    "seconds": 0.7
+    "seconds": 0.93
   },
   "extraction": {
     "recall": 1.0,
