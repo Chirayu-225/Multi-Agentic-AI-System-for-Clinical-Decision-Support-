@@ -2,14 +2,17 @@
  "model": "openai/gpt-oss-120b",
  "prompt_versions": {
   "orchestrator": "273ee85d36",
-  "summarizer": "4e8f94dc1f",
-  "verifier": "a66410fd1c",
+  "summarizer": "7a9b6b0287",
+  "verifier": "3c4e1dc8f6",
   "translator": "c7dc464687"
  },
  "metrics": {
   "verifier.catch_rate": 1.0,
   "verifier.false_alarm_rate": 0.0,
   "verifier.unverified_rate": 0.0,
-  "summarizer.ungrounded_rate": 0.0
+  "summarizer.ungrounded_rate": 0.0,
+  "summarizer.unusable_rate": 0.0,
+  "summarizer.thin_rate": 0.0,
+  "actions.directive_rate": 0.0
  }
 }
