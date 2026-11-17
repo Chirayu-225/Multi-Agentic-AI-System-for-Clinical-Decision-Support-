@@ -221,7 +221,7 @@ export class ApiService {
 
   // ── Health ────────────────────────────────────────────────────────────────
 
-  health(): Observable<{ status: string }> {
-    return this.http.get<{ status: string }>(`${this.base}/health`);
+  health(): Observable<{ status: string; provider?: string; model?: string }> {
+    return this.http.get<{ status: string; provider?: string; model?: string }>(`${this.base}/health`);
   }
 }

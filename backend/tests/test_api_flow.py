@@ -175,7 +175,17 @@ def upload(client, headers, **kw):
 
 def test_health_is_public_and_minimal(client):
     r = client.get("/health")
-    assert r.status_code == 200 and set(r.json()) == {"status", "version"}
+    assert r.status_code == 200 and set(r.json()) == {"status", "version", "provider", "model"}
+
+
+def test_health_names_the_model_that_is_really_configured(client, monkeypatch):
+    """The sidebar and the About page show this, instead of a model name typed into the page."""
+    import src.llm as llm
+    monkeypatch.setattr(llm, "PROVIDER", "groq")
+    monkeypatch.setattr(llm, "MODEL", "openai/gpt-oss-120b")
+    body = client.get("/health").json()
+    assert body["provider"] == "groq" and body["model"] == "openai/gpt-oss-120b"
+    assert "key" not in str(body).lower() and "http" not in str(body).lower()
 
 
 def test_upload_requires_authentication(client):

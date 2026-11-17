@@ -54,6 +54,7 @@ from src.ingestion.document_loader import (
 from src.agents.orchestrator import run_orchestrator
 from src.flagging.risk_flagging import compute_risk_summary
 from src import ai_quality, outbox, prompts
+from src import llm as _llm_settings
 from src.llm import begin_call_tracking, begin_model_tracking, llm_unavailable_for, required_key_name
 from src.agents.summarizer import directive_actions, generate_summaries, is_placeholder
 from src.agents.verifier import verify_and_correct
@@ -227,7 +228,10 @@ def _bootstrap_users():
 def health():
     # LIVENESS: the process is up and answering. Deliberately minimal and unauthenticated, and it
     # touches nothing else, so a slow database cannot make an orchestrator kill a healthy process.
-    return {"status": "ok", "version": APP_VERSION}
+    # provider and model are named so the UI can say which model is really answering, instead of a
+    # name typed into the page. Neither is a secret; no key, URL or setting beyond these two is here.
+    return {"status": "ok", "version": APP_VERSION,
+            "provider": _llm_settings.PROVIDER, "model": _llm_settings.MODEL}
 
 
 @app.get("/ready")

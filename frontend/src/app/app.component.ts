@@ -8,6 +8,7 @@ import { DashboardComponent } from './components/dashboard/dashboard.component';
 import { PatientPortalComponent } from './components/portal/patient-portal.component';
 import { LoginComponent } from './components/auth/login.component';
 import { AccountsComponent } from './components/accounts/accounts.component';
+import { ApiService } from './services/api.service';
 import { AuthService } from './services/auth.service';
 import { ReviewStateService } from './services/review-state.service';
 import { Role } from './models/report.model';
@@ -111,7 +112,7 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
         <div class="p-4 border-t border-gray-800 hidden md:block">
           <div class="bg-gray-800/60 border border-gray-800/80 rounded-lg p-3 text-xs text-gray-500 leading-relaxed">
             <p class="font-semibold text-gray-400 mb-1.5 tracking-wide">Multi-Agent Pipeline</p>
-            <p>Orchestrator + Verification agents running on Gemini 3.8 Flash</p>
+            <p>Orchestrator + Verification agents running on {{ modelLabel() }}</p>
             <div class="mt-2 flex gap-1">
               <span class="bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded text-xs">PubMed</span>
               <span class="bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded text-xs">OpenFDA</span>
@@ -185,7 +186,7 @@ interface NavItem { id: Page; label: string; icon: string; roles: Role[] }
         <div class="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
           <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">Tech Stack</p>
           <div class="flex flex-wrap gap-2">
-            @for (tag of stack; track tag) {
+            @for (tag of stackTags(); track tag) {
               <span class="bg-gray-800 border border-gray-700 text-gray-300
                             font-mono text-xs px-3 py-1.5 rounded-md
                             hover:border-blue-700 hover:text-blue-300 transition-colors">{{ tag }}</span>
@@ -222,7 +223,20 @@ export class AppComponent {
     return items.some((n) => n.id === wanted) ? wanted : (items[0]?.id ?? 'about');
   });
 
-  constructor(public auth: AuthService, public reviewState: ReviewStateService) {
+  /** The model the backend is really using ("Groq · openai/gpt-oss-120b"), read from /health. Until it
+   *  answers, or if it cannot, a neutral name is shown rather than a wrong one. */
+  modelLabel = signal('an AI model');
+
+  constructor(public auth: AuthService, public reviewState: ReviewStateService, private api: ApiService) {
+    this.api.health().subscribe({
+      next: (h) => {
+        if (h.model) {
+          const provider = h.provider ? h.provider.charAt(0).toUpperCase() + h.provider.slice(1) : '';
+          this.modelLabel.set(provider ? `${provider} · ${h.model}` : h.model);
+        }
+      },
+      error: () => { /* keep the neutral name */ },
+    });
     // New sign-in (or sign-out) -> land on the role's first page; poll the
     // pending-review count for clinicians only.
     effect(() => {
@@ -281,11 +295,11 @@ export class AppComponent {
     },
   ];
 
-  stack = [
+  stackTags = computed(() => [
     'Angular', 'TypeScript', 'TailwindCSS',
     'FastAPI', 'SQLAlchemy', 'PostgreSQL',
-    'ChromaDB', 'Gemini 3.8 Flash',
+    'ChromaDB', this.modelLabel(),
     'GLiNER', 'EasyOCR', 'PyMuPDF',
     'OpenFDA API', 'Docker',
-  ];
+  ]);
 }
