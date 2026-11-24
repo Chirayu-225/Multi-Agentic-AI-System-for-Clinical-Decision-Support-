@@ -32,7 +32,7 @@ def _ver(pkg: str) -> str:
 
 
 async def _plain():
-    from src.llm import generate_text
+    from src.core.llm import generate_text
     out = await generate_text("Reply with exactly the word: OK", label="CHECK", attempts=2)
     return out[:80]
 
@@ -45,7 +45,7 @@ async def _translate():
 
 async def _tool_call():
     from google.genai import types
-    from src.llm import get_client
+    from src.core.llm import get_client
 
     tool = types.Tool(function_declarations=[types.FunctionDeclaration(
         name="get_reference_range", description="Look up the normal range for a lab test.",
@@ -53,7 +53,7 @@ async def _tool_call():
                                 "required": ["test"]})])
     cfg = types.GenerateContentConfig(
         tools=[tool], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
-    from src.llm import with_fallback
+    from src.core.llm import with_fallback
 
     async def _open(model):
         c = get_client().aio.chats.create(model=model, config=cfg)
@@ -68,7 +68,7 @@ async def _tool_call():
 
 
 async def main() -> int:
-    from src.llm import FALLBACK_MODEL, MODEL, TIMEOUT_SECONDS, begin_model_tracking
+    from src.core.llm import FALLBACK_MODEL, MODEL, TIMEOUT_SECONDS, begin_model_tracking
     print(f"python          {sys.version.split()[0]}")
     print(f"google-genai    {_ver('google-genai')}")
     print(f"legacy SDK      google-generativeai {_ver('google-generativeai')} (unused; safe to uninstall)")

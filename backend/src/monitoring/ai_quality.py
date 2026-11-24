@@ -1,5 +1,5 @@
 """
-src/ai_quality.py
+src/monitoring/ai_quality.py
 
 The clinician-edit feedback loop. A clinician approving, editing or rejecting an AI summary is the
 only ground truth this system will ever get for free, so it is measured instead of discarded:

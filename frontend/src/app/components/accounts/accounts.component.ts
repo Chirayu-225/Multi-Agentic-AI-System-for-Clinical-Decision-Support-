@@ -7,7 +7,7 @@ import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../../services/api.service';
-import { errorMessage } from '../../services/error-message';
+import { errorMessage } from '../../utils/error-message';
 import { PatientAccount, PatientAccountWithSecret } from '../../models/report.model';
 
 @Component({

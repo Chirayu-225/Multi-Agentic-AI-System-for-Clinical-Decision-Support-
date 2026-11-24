@@ -7,7 +7,7 @@ re-used patient id resurrected the old history. Rejected reports also kept feedi
 """
 import pytest
 
-import main
+from tests.patching import patch_used
 from src.tools import history_store
 from tests.test_api_flow import (CLIN, RAW_TEXT, client, fresh_state, login, upload)  # noqa: F401
 
@@ -67,7 +67,7 @@ def test_store_uses_report_id_and_both_deletes_work(store):
 
 
 def test_upload_stores_redacted_text_only(client, store, monkeypatch):
-    monkeypatch.setattr(main, "chroma_store", history_store.store_report)
+    patch_used(monkeypatch, "chroma_store", history_store.store_report)
     ch = login(client, CLIN)
     rid = upload(client, ch, name="Report_Priya_Sharma.pdf").json()["report_id"]
     doc, meta = store.cols["patient-P001"].rows[rid]
@@ -77,7 +77,7 @@ def test_upload_stores_redacted_text_only(client, store, monkeypatch):
 
 
 def test_delete_patient_clears_history_store(client, store, monkeypatch):
-    monkeypatch.setattr(main, "chroma_store", history_store.store_report)
+    patch_used(monkeypatch, "chroma_store", history_store.store_report)
     ch = login(client, CLIN)
     upload(client, ch)
     assert "patient-P001" in store.cols
@@ -91,13 +91,13 @@ def test_delete_refuses_to_claim_success_if_store_fails(client, monkeypatch):
 
     def boom(_pid):
         raise RuntimeError("store down")
-    monkeypatch.setattr(main, "delete_patient_history", boom)
+    patch_used(monkeypatch, "delete_patient_history", boom)
     assert client.delete("/patient/P001", headers=ch).status_code == 500
     assert client.get("/patient/P001/history", headers=ch).json()["report_count"] == 1
 
 
 def test_rejected_report_is_removed_from_history(client, store, monkeypatch):
-    monkeypatch.setattr(main, "chroma_store", history_store.store_report)
+    patch_used(monkeypatch, "chroma_store", history_store.store_report)
     ch = login(client, CLIN)
     rid = upload(client, ch).json()["report_id"]
     r = client.post(f"/report/{rid}/review", headers=ch,

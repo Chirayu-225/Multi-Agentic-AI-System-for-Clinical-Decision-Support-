@@ -85,7 +85,7 @@ import pytest  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_llm_protection():
     """Circuit breakers are process-wide; a test that trips one must not affect the next."""
-    from src import llm
+    from src.core import llm
     llm._breakers.clear()
     yield
     llm._breakers.clear()

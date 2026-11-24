@@ -1,5 +1,5 @@
 # NOTE: aiohttp and pandas were removed - neither is imported anywhere in the code, and
-# aiohttp 3.9.5 alone carried 68 known advisories (found by pip-audit, see SECURITY.md).
+# aiohttp 3.9.5 alone carried 68 known advisories (found by pip-audit, see docs/SECURITY.md).
 # API & framework
 fastapi==0.111.0
 uvicorn==0.30.1

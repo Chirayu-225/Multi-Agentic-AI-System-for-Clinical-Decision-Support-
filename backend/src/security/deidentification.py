@@ -14,7 +14,7 @@ do we substitute the placeholders back to their real values (rehydrate) for stor
 the API response the UI renders. The real values never leave the process in a Gemini request.
 
 Call sequence for one report upload (see run_orchestrator / generate_summaries /
-verify_and_correct / main.py's upload_report):
+verify_and_correct / src/pipeline/upload.py's process_upload):
   1. orchestrator.run_orchestrator() extracts entities locally (no LLM — see that module's
      docstring), then calls build_redaction_map() and redact()s the raw report text before
      it's included in the one Gemini prompt that still carries free text.
@@ -22,7 +22,7 @@ verify_and_correct / main.py's upload_report):
      which redact() the patient-identifying line of their own prompts before calling Gemini.
      Their returned summaries therefore still contain the placeholder tokens, not real
      values — this is intentional, not a bug, and MUST stay that way until step 3.
-  3. main.py's upload_report(), after all three agents are done, calls rehydrate() exactly
+  3. src/pipeline/upload.py's process_upload(), after all three agents are done, calls rehydrate() exactly
      once on every user-facing text field before building the API response / DB row. This
      is the ONLY point where placeholders are converted back to real values.
 

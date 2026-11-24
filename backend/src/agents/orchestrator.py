@@ -30,8 +30,8 @@ import asyncio
 import logging
 from typing import Callable
 
-from src import llm as _llm
-from src.llm import MODEL, get_client, with_fallback, with_retry
+from src.core import llm as _llm
+from src.core.llm import MODEL, get_client, with_fallback, with_retry
 
 logger = logging.getLogger("medsight")
 from src.tools.tool_registry import TOOL_FUNCTIONS, TOOL_DEFINITIONS
@@ -60,7 +60,7 @@ AGENTIC_TOOL_NAMES = {"get_similar_history", "search_pubmed", "check_drug_safety
 
 def _enabled_tools() -> set[str]:
     """The agentic tools offered for THIS run — PubMed only when ENABLE_PUBMED is on."""
-    from src.features import pubmed_enabled
+    from src.core.features import pubmed_enabled
     return AGENTIC_TOOL_NAMES if pubmed_enabled() else AGENTIC_TOOL_NAMES - {"search_pubmed"}
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are a clinical decision support agent for Indian healthcare settings.
@@ -159,7 +159,7 @@ MAX_REPORT_CHARS = 20000
 
 async def _send_with_retry(chat, message, max_attempts: int = 3, model: str | None = None):
     """Send one turn on the chat session, backing off on rate limits (shared policy in
-    src/llm.py). The chat keeps the model's full previous turn — including Gemini 3's
+    src/core/llm.py). The chat keeps the model's full previous turn — including Gemini 3's
     thought signatures — in its history, which multi-turn tool calling requires."""
     return await with_retry(lambda: chat.send_message(message),
                             label="ORCHESTRATOR", attempts=max_attempts, base_wait=20, model=model)
@@ -354,7 +354,7 @@ async def run_orchestrator(
     if isinstance(trends_result, dict):
         accumulated_data["trend_flags"] = trends_result.get("trend_flags", [])
         accumulated_data["baseline_flags"] = trends_result.get("baseline_flags", [])
-        from src.features import forecasting_enabled
+        from src.core.features import forecasting_enabled
         accumulated_data["forecast_flags"] = (
             trends_result.get("forecast_flags", []) if forecasting_enabled() else [])
     _log_step("detect_trends", trends_args, trends_result)
@@ -564,7 +564,7 @@ this turn.
 
     # Leading underscore + real values as KEYS (not just referenced) means
     # this is never meant to survive past the caller's immediate use. The
-    # caller (main.py) MUST pop this out and pass it explicitly to
+    # caller (src/pipeline/upload.py) MUST pop this out and pass it explicitly to
     # generate_summaries()/verify_and_correct(), then rehydrate() once at
     # the very end — it must never be logged, persisted, or included in the
     # API response as-is. See deidentification.py's module docstring.

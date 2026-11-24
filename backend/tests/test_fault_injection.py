@@ -7,7 +7,9 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 import main
-from src import outbox
+from tests.patching import patch_used
+from src.security import audit
+from src.jobs import outbox
 from src.db.models import OutboxEvent, Report, UploadJob
 from src.db.session import SessionLocal, engine
 from src.jobs.queue import PermanentJobError
@@ -39,7 +41,7 @@ def test_database_error_at_the_final_save_is_retried_and_leaves_exactly_one_repo
             raise OperationalError("INSERT", {}, Exception("connection reset"))
         return real_add(*a, **k)
 
-    monkeypatch.setattr(main.outbox, "add", flaky_add)
+    monkeypatch.setattr(outbox, "add", flaky_add)
     h = login(client, CLIN)
     upload_raw(client, h, report_id="f-1")
     assert wait_for_job(client, h, "f-1")["status"] == "complete"
@@ -55,7 +57,7 @@ def test_a_permanently_failed_analysis_still_leaves_the_critical_result_visible_
     async def dies(*a, **k):
         raise PermanentJobError("model output unusable")
 
-    monkeypatch.setattr(main, "generate_summaries", dies)
+    patch_used(monkeypatch, "generate_summaries", dies)
     h = login(client, CLIN)
     upload_raw(client, h, report_id="f-2")
     assert wait_for_job(client, h, "f-2")["status"] == "failed"
@@ -70,7 +72,7 @@ def test_a_permanently_failed_analysis_still_leaves_the_critical_result_visible_
 
 def test_history_store_outage_never_loses_the_report_or_the_pending_write(client, monkeypatch):
     monkeypatch.setenv("OUTBOX_RETRY_BASE_SECONDS", "3600")
-    monkeypatch.setattr(main, "chroma_store", lambda **k: (_ for _ in ()).throw(OSError("chroma down")))
+    patch_used(monkeypatch, "chroma_store", lambda **k: (_ for _ in ()).throw(OSError("chroma down")))
     h = login(client, CLIN)
     assert upload(client, h, report_id="f-3").status_code == 200
     (r,) = rows("f-3")
@@ -89,7 +91,7 @@ def test_an_unusable_verifier_cannot_produce_a_silently_approvable_report(client
                 "clinical_unverified": True, "patient_unverified": True,
                 "clinical_issues": "x", "patient_issues": "x"}
 
-    monkeypatch.setattr(main, "verify_and_correct", unverified)
+    patch_used(monkeypatch, "verify_and_correct", unverified)
     h = login(client, CLIN)
     upload(client, h, report_id="f-4")
     r = client.post("/report/f-4/review", headers=h, json={"decision": "approve"})
@@ -106,7 +108,7 @@ def test_release_decision_fails_closed_when_the_audit_log_cannot_be_written(clie
         if k.get("critical"):
             raise RuntimeError("audit store down")
 
-    monkeypatch.setattr(main.audit, "record", broken)
+    monkeypatch.setattr(audit, "record", broken)
     from fastapi.testclient import TestClient
     r = TestClient(main.app, raise_server_exceptions=False).post("/report/f-5/review", headers=h, json=APPROVE)
     assert r.status_code == 500                              # the approval must not silently go through

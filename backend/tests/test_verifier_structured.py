@@ -123,7 +123,7 @@ def test_provider_error_during_the_repair_also_fails_closed(monkeypatch):
 
 
 def test_circuit_open_fails_closed(monkeypatch):
-    from src.resilience import CircuitOpen
+    from src.core.resilience import CircuitOpen
     out, _ = audit([CircuitOpen(30)], monkeypatch)
     assert out["clinical_unverified"] and out["patient_unverified"]
 

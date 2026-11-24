@@ -5,8 +5,8 @@ import { Component, Input, OnChanges, OnDestroy, SimpleChanges, signal } from '@
 import { FormsModule } from '@angular/forms';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
-import { errorMessage } from '../../services/error-message';
-import { LANGUAGES, languageName } from '../../services/languages';
+import { errorMessage } from '../../utils/error-message';
+import { LANGUAGES, languageName } from '../../utils/languages';
 
 @Component({
   selector: 'app-translatable-summary',

@@ -12,6 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from tests.patching import patch_used
+from src.api.bootstrap import bootstrap_users
 from src.db.models import Base, AuditEvent
 from src.db.session import engine, SessionLocal
 from src.security import audit, rate_limit
@@ -60,7 +62,7 @@ def fresh_state(monkeypatch):
     rate_limit._WINDOWS.clear()
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    main._bootstrap_users()
+    bootstrap_users()
     CAPTURED.clear()
 
     async def fake_load(path):
@@ -112,12 +114,12 @@ def fresh_state(monkeypatch):
         return {"language": language, "text": redacted_summary.replace("Dear", "नमस्ते"),
                 "ok": True, "issues": [], "attempted": True}
 
-    monkeypatch.setattr(main, "load_document", load_document)
-    monkeypatch.setattr(main, "run_orchestrator", fake_orchestrator)
-    monkeypatch.setattr(main, "generate_summaries", fake_summaries)
-    monkeypatch.setattr(main, "verify_and_correct", fake_verify)
-    monkeypatch.setattr(main, "translate_patient_summary", fake_translate)
-    monkeypatch.setattr(main, "chroma_store", lambda **k: None)
+    patch_used(monkeypatch, "load_document", load_document)
+    patch_used(monkeypatch, "run_orchestrator", fake_orchestrator)
+    patch_used(monkeypatch, "generate_summaries", fake_summaries)
+    patch_used(monkeypatch, "verify_and_correct", fake_verify)
+    patch_used(monkeypatch, "translate_patient_summary", fake_translate)
+    patch_used(monkeypatch, "chroma_store", lambda **k: None)
     yield
 
 
@@ -180,7 +182,7 @@ def test_health_is_public_and_minimal(client):
 
 def test_health_names_the_model_that_is_really_configured(client, monkeypatch):
     """The sidebar and the About page show this, instead of a model name typed into the page."""
-    import src.llm as llm
+    import src.core.llm as llm
     monkeypatch.setattr(llm, "PROVIDER", "groq")
     monkeypatch.setattr(llm, "MODEL", "openai/gpt-oss-120b")
     body = client.get("/health").json()
@@ -613,8 +615,8 @@ def _critical_upload(client, monkeypatch, summarizer_answer):
 
     monkeypatch.setattr(summarizer_mod, "generate_text", summarizer_model)
     monkeypatch.setattr(verifier_mod, "generate_text", verifier_model)
-    monkeypatch.setattr(main, "generate_summaries", summarizer_mod.generate_summaries)
-    monkeypatch.setattr(main, "verify_and_correct", verifier_mod.verify_and_correct)
+    patch_used(monkeypatch, "generate_summaries", summarizer_mod.generate_summaries)
+    patch_used(monkeypatch, "verify_and_correct", verifier_mod.verify_and_correct)
     h = login(client, CLIN)
     r = upload(client, h)
     assert r.status_code == 200, r.text

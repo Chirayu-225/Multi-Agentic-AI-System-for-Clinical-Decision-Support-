@@ -225,7 +225,7 @@ def eval_grounding(cases):
         flags = flag_lab_values([{"test": l.display, "value": l.value, "unit": l.unit} for l in c.labs], c.gender)
         allowed = collect_allowed_numbers({"labs": [{"v": l.value} for l in c.labs]}, flags,
                                           {"age": "x"}, extra_texts=[c.text])
-        # NOTE: `allowed` is built from the SAME structured data main.py uses (flags + entities),
+        # NOTE: `allowed` is built from the SAME structured data src/pipeline/upload.py uses (flags + entities),
         # not from the summary under test.
         allowed = collect_allowed_numbers({"labs": [{"test": l.display, "value": l.value, "unit": l.unit} for l in c.labs]}, flags)
         clean = _truth_summary(c)
@@ -335,7 +335,7 @@ def run(live: bool = False) -> dict:
         "interactions": eval_interactions(),
     }
     if live:
-        from src.llm import required_key_name
+        from src.core.llm import required_key_name
         if not os.getenv(required_key_name()):
             raise SystemExit(f"--live needs {required_key_name()}")
         res["live_verifier"] = eval_live_verifier(cases)
@@ -426,7 +426,7 @@ if __name__ == "__main__":
     if not a.no_write:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         (RESULTS_DIR / "latest.json").write_text(json.dumps(result, indent=2))
-        (ROOT.parent / "EVAL_RESULTS.md").write_text(md)
+        (ROOT.parent / "docs" / "EVAL_RESULTS.md").write_text(md)
     if a.check:
         bad = check(result)
         if bad:

@@ -7,7 +7,7 @@ import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../services/api.service';
 import { SeverityService } from '../../services/severity.service';
-import { errorMessage } from '../../services/error-message';
+import { errorMessage } from '../../utils/error-message';
 import {
   MyReportItem, PatientLabValue, PatientReportView, TrendSeries,
 } from '../../models/report.model';

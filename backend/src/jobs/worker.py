@@ -21,7 +21,7 @@ import time
 from datetime import timedelta
 from typing import Awaitable, Callable
 
-from src import observability as obs
+from src.monitoring import observability as obs
 from src.jobs import queue as q
 
 logger = logging.getLogger("medsight.jobs")

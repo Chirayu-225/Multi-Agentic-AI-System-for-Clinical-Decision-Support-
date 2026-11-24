@@ -1,7 +1,7 @@
 """
 src/agents/summarizer.py
 
-Generates clinical and patient summaries using the pinned Gemini model (src/llm.py).
+Generates clinical and patient summaries using the pinned Gemini model (src/core/llm.py).
 Replaces the local Phi-3 Mini inference from v1.
 Called by the orchestrator after all tool calls are complete.
 """
@@ -10,7 +10,7 @@ import json
 import logging
 import re
 
-from src.llm import generate_text
+from src.core.llm import generate_text
 
 logger = logging.getLogger("medsight.summarizer")
 
@@ -271,7 +271,7 @@ async def generate_summaries(
 
     IMPORTANT: the returned text still contains redaction placeholders (e.g.
     "[REDACTED_NAME_1]") wherever the patient's name would appear — see
-    deidentification.py. The caller (main.py) is responsible for calling
+    deidentification.py. The caller (src/pipeline/upload.py) is responsible for calling
     rehydrate() on every field here exactly once, after the Verifier has
     also run on this same (still-redacted) text. Do NOT rehydrate here.
     """

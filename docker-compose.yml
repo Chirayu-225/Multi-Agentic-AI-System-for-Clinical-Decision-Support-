@@ -44,7 +44,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in .env}
       - ACCESS_TOKEN_MINUTES=${ACCESS_TOKEN_MINUTES:-60}
       - REQUIRE_CLINICIAN_REVIEW=${REQUIRE_CLINICIAN_REVIEW:-true}
-      # Optional, off by default (see backend/src/features.py)
+      # Optional, off by default (see backend/src/core/features.py)
       - ENABLE_FORECASTING=${ENABLE_FORECASTING:-false}
       - ENABLE_PUBMED=${ENABLE_PUBMED:-false}
       - AUDIT_ENABLED=${AUDIT_ENABLED:-true}

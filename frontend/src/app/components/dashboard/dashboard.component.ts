@@ -7,7 +7,7 @@ import { DatePipe } from '@angular/common';
 import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../services/api.service';
-import { errorMessage } from '../../services/error-message';
+import { errorMessage } from '../../utils/error-message';
 import { AdminMetrics, AuditEvent, AuditVerification } from '../../models/report.model';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

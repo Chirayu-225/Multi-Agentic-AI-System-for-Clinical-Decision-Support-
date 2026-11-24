@@ -6,8 +6,8 @@ import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../services/api.service';
 import { SeverityService } from '../../services/severity.service';
-import { errorMessage } from '../../services/error-message';
-import { downloadBlob } from '../../services/download';
+import { errorMessage } from '../../utils/error-message';
+import { downloadBlob } from '../../utils/download';
 import { PendingReviewItem, ReportAnalysis, ReviewStatus } from '../../models/report.model';
 import { ReportResultComponent } from '../report/report-result.component';
 

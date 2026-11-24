@@ -75,7 +75,7 @@ class Report(Base):
     ai_clinical_summary   = Column(Text)
     ai_patient_summary    = Column(Text)
     review_edited         = Column(Boolean)   # True if the clinician changed either summary
-    edit_ratio            = Column(Float)     # 0..1 word-level change vs the AI text (src/ai_quality.py)
+    edit_ratio            = Column(Float)     # 0..1 word-level change vs the AI text (src/monitoring/ai_quality.py)
     edit_words_changed    = Column(Integer)   # words inserted + deleted by the clinician
     warnings_acknowledged = Column(Boolean)   # True if approved with warnings explicitly accepted
     uploaded_by   = Column(String)
@@ -118,8 +118,8 @@ class AgentRun(Base):
     caller_fingerprint = Column(String)
     duration_ms  = Column(Integer)   # wall-clock for the whole pipeline
     llm_calls    = Column(Integer)   # Gemini round trips made for this report
-    model        = Column(String)    # exact model id that produced this run (see src/llm.py)
-    prompt_versions = Column(JSON)   # {"summarizer": "summarizer@4e8f94dc1f", ...} see src/prompts.py
+    model        = Column(String)    # exact model id that produced this run (see src/core/llm.py)
+    prompt_versions = Column(JSON)   # {"summarizer": "summarizer@4e8f94dc1f", ...} see src/agents/prompts.py
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 

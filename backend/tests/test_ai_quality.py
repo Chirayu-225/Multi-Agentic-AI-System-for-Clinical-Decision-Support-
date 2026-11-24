@@ -2,7 +2,7 @@
 import pytest
 
 import main
-from src import ai_quality as aq
+from src.monitoring import ai_quality as aq
 from src.db.models import AgentRun, Report
 from src.db.session import SessionLocal
 

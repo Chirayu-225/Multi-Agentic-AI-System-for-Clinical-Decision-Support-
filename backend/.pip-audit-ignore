@@ -1,4 +1,4 @@
-# Accepted risks for pip-audit. Every package here is justified in SECURITY.md
+# Accepted risks for pip-audit. Every package here is justified in docs/SECURITY.md
 # ("Dependency audit") - this file is not a place to silence noise.
 #
 # The ML stack (torch, transformers, sentence-transformers, chromadb) is pinned

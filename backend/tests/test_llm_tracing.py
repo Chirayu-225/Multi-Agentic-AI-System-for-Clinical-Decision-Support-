@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import main
-from src import llm, prompts
+from tests.patching import patch_used
+from src.pipeline import upload as upload_pipeline
+from src.core import llm
+from src.agents import prompts
 from src.db.models import AgentRun, LlmCall
 from src.db.session import SessionLocal
 
@@ -82,7 +84,7 @@ def test_missing_usage_metadata_is_zero_not_an_error():
 
 
 def test_open_circuit_is_recorded_without_calling_the_provider():
-    from src.resilience import CircuitBreaker, CircuitOpen
+    from src.core.resilience import CircuitBreaker, CircuitOpen
     b = CircuitBreaker(failure_threshold=1, cooldown_seconds=60)
     b.record_failure()
     called = []
@@ -156,13 +158,13 @@ def test_summarizer_prompt_still_carries_its_inputs():
 
 @pytest.fixture()
 def traced_summaries(monkeypatch):
-    real = main.generate_summaries
+    real = upload_pipeline.generate_summaries
 
     async def summaries(*a, **k):
         await llm.with_retry(lambda: asyncio.sleep(0, resp(1000, 200)), label="SUMMARIZER", model="m-x")
         return await real(*a, **k)
 
-    monkeypatch.setattr(main, "generate_summaries", summaries)
+    patch_used(monkeypatch, "generate_summaries", summaries)
 
 
 def test_calls_are_persisted_with_versions_tokens_and_notional_cost(client, traced_summaries):
@@ -196,7 +198,7 @@ def test_calls_made_by_a_failed_attempt_are_still_recorded(client, monkeypatch):
         from src.jobs.queue import PermanentJobError
         return PermanentJobError("stop")
 
-    monkeypatch.setattr(main, "generate_summaries", summaries)
+    patch_used(monkeypatch, "generate_summaries", summaries)
     h = login(client, CLIN)
     upload_raw(client, h, report_id="t-3")
     assert wait_for_job(client, h, "t-3")["status"] == "failed"

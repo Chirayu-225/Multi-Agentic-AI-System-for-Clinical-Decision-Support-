@@ -1,5 +1,5 @@
 """
-src/outbox.py
+src/jobs/outbox.py
 
 Transactional outbox for the one write that cannot share the database transaction: the ChromaDB
 history store.
@@ -22,7 +22,7 @@ from typing import Callable
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from src import observability as obs
+from src.monitoring import observability as obs
 from src.db.models import OutboxEvent
 
 logger = logging.getLogger("medsight.outbox")

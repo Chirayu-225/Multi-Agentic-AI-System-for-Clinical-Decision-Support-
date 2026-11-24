@@ -1,4 +1,4 @@
-"""src/llm.py: timeouts, the single retry policy, and the fallback model.
+"""src/core/llm.py: timeouts, the single retry policy, and the fallback model.
 
 Regression: gemini-3.8-flash returned '503 UNAVAILABLE: high demand' and the SDK's default
 5 silent attempts with no request timeout made every Gemini call look frozen."""
@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-import src.llm as llm
+import src.core.llm as llm
 
 
 class Err503(Exception):

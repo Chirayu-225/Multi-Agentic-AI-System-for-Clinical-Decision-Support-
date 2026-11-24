@@ -6,8 +6,9 @@ from datetime import timedelta
 
 import pytest
 
-import main
-from src import outbox
+from tests.patching import patch_used
+from src.pipeline.history_sync import HISTORY_PENDING
+from src.jobs import outbox
 from src.db.models import OutboxEvent, Report
 from src.db.session import SessionLocal
 
@@ -40,7 +41,7 @@ def _wait(pred, timeout=5.0):
 
 def test_event_is_written_with_the_report_and_applied_once(client, monkeypatch):
     calls = []
-    monkeypatch.setattr(main, "chroma_store", lambda **k: calls.append(k))
+    patch_used(monkeypatch, "chroma_store", lambda **k: calls.append(k))
     h = login(client, CLIN)
     upload(client, h, report_id="o-1")
     assert [c["report_id"] for c in calls] == ["o-1"]
@@ -51,7 +52,7 @@ def test_event_is_written_with_the_report_and_applied_once(client, monkeypatch):
 
 def test_payload_holds_redacted_text_only(client, monkeypatch):
     seen = {}
-    monkeypatch.setattr(main, "chroma_store", lambda **k: seen.update(k))
+    patch_used(monkeypatch, "chroma_store", lambda **k: seen.update(k))
     h = login(client, CLIN)
     upload(client, h, report_id="o-2")
     assert "Priya" not in seen["report_text"] and "9876543210" not in seen["report_text"]
@@ -67,20 +68,20 @@ def test_failed_write_stays_queued_with_a_visible_warning_then_succeeds_on_retry
         if state["fail"]:
             raise OSError("embedding model unavailable")
 
-    monkeypatch.setattr(main, "chroma_store", store)
+    patch_used(monkeypatch, "chroma_store", store)
     h = login(client, CLIN)
     r = upload(client, h, report_id="o-3")
     assert r.status_code == 200                                    # the upload itself succeeded
     assert _events("o-3")[0][0] == "pending" and "OSError" in _events("o-3")[0][2]
     warn = _warnings("o-3")
-    assert any(w.startswith(main.HISTORY_PENDING) for w in warn)
+    assert any(w.startswith(HISTORY_PENDING) for w in warn)
 
     state["fail"] = False                                          # the store recovers
     with SessionLocal() as db:
         db.query(OutboxEvent).update({"next_attempt_at": outbox.utcnow() - timedelta(seconds=1)})
         db.commit()
     assert _wait(lambda: _events("o-3")[0][0] == "done")
-    assert _wait(lambda: not any(w.startswith(main.HISTORY_PENDING) for w in _warnings("o-3")))
+    assert _wait(lambda: not any(w.startswith(HISTORY_PENDING) for w in _warnings("o-3")))
 
 
 def test_gives_up_after_max_attempts_and_says_so(client, monkeypatch):
@@ -90,13 +91,13 @@ def test_gives_up_after_max_attempts_and_says_so(client, monkeypatch):
     def boom(**k):
         raise OSError("down")
 
-    monkeypatch.setattr(main, "chroma_store", boom)
+    patch_used(monkeypatch, "chroma_store", boom)
     h = login(client, CLIN)
     upload(client, h, report_id="o-4")
     assert _wait(lambda: _events("o-4")[0][0] == "dead")
     assert _events("o-4")[0][1] == 2
     assert _wait(lambda: any("after repeated attempts" in w for w in _warnings("o-4")))
-    assert not any(w.startswith(main.HISTORY_PENDING) for w in _warnings("o-4"))
+    assert not any(w.startswith(HISTORY_PENDING) for w in _warnings("o-4"))
 
 
 # The three tests below deliberately do not use the `client` fixture: it starts the app's own outbox
@@ -141,8 +142,8 @@ def test_rejection_cancels_a_pending_write_and_nothing_is_stored(client, monkeyp
         calls.append(k)
         raise OSError("down")
 
-    monkeypatch.setattr(main, "chroma_store", flaky)
-    monkeypatch.setattr(main, "delete_report_history", lambda *a, **k: None)
+    patch_used(monkeypatch, "chroma_store", flaky)
+    patch_used(monkeypatch, "delete_report_history", lambda *a, **k: None)
     h = login(client, CLIN)
     upload(client, h, report_id="o-5")
     assert _events("o-5")[0][0] == "pending"
@@ -160,21 +161,21 @@ def test_rejection_cancels_a_pending_write_and_nothing_is_stored(client, monkeyp
 def test_write_that_races_with_a_rejection_is_undone(client, monkeypatch):
     undone = []
     h = login(client, CLIN)
-    monkeypatch.setattr(main, "delete_report_history", lambda pid, rid: undone.append((pid, rid)))
+    patch_used(monkeypatch, "delete_report_history", lambda pid, rid: undone.append((pid, rid)))
 
     def store(**k):                                                # the clinician rejects mid-write
         with SessionLocal() as db:
             db.query(Report).filter(Report.id == k["report_id"]).update({"review_status": "rejected"})
             db.commit()
 
-    monkeypatch.setattr(main, "chroma_store", store)
+    patch_used(monkeypatch, "chroma_store", store)
     upload(client, h, report_id="o-6")
     assert undone == [("P001", "o-6")]
 
 
 def test_patient_erasure_removes_outbox_events(client, monkeypatch):
     monkeypatch.setenv("OUTBOX_RETRY_BASE_SECONDS", "3600")
-    monkeypatch.setattr(main, "chroma_store", lambda **k: (_ for _ in ()).throw(OSError("down")))
+    patch_used(monkeypatch, "chroma_store", lambda **k: (_ for _ in ()).throw(OSError("down")))
     h = login(client, CLIN)
     upload(client, h, report_id="o-7")
     assert _events("o-7")

@@ -2,7 +2,7 @@
 import { Component, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../services/auth.service';
-import { errorMessage } from '../../services/error-message';
+import { errorMessage } from '../../utils/error-message';
 
 @Component({
   selector: 'app-login',

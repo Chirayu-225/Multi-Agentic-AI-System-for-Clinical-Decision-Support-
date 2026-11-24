@@ -20,7 +20,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(ROOT / ".env")
 os.environ["LLM_PROVIDER"] = "groq"                      # this script is about Groq whatever the default is
 
-import src.llm as llm  # noqa: E402
+import src.core.llm as llm  # noqa: E402
 
 
 def say(text=""):

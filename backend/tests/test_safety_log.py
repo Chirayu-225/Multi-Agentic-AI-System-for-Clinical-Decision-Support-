@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 BACKEND = Path(__file__).resolve().parent.parent
-SAFETY = BACKEND.parent / "SAFETY.md"
+SAFETY = BACKEND.parent / "docs" / "SAFETY.md"
 SEVERITIES = {"catastrophic", "major", "moderate", "minor"}
 REF = re.compile(r"`(tests/[\w/]+\.py)::(\w+)(?:\[[^\]]*\])?`")
 

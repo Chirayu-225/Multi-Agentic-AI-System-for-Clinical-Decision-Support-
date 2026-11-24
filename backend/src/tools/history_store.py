@@ -57,7 +57,7 @@ def _get_collection(patient_id: str):
 def store_report(patient_id: str, report_text: str, lab_values: list,
                  report_date: str = None, filename: str = "", report_id: str | None = None) -> str:
     """Store one report for longitudinal recall. Callers pass ALREADY-REDACTED text (see
-    main.py). Semantic-recall results from this store are sent to the model as tool
+    src/pipeline/upload.py). Semantic-recall results from this store are sent to the model as tool
     results, so nothing identifying may live here — which is also why the uploaded
     filename (often "Report_<Patient_Name>.pdf") is NOT stored; `filename` is accepted
     for backward compatibility and ignored. The vector id is the report id, so a single

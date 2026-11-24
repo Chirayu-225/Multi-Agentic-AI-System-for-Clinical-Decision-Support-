@@ -1,4 +1,4 @@
-// src/app/services/languages.ts
+// src/app/utils/languages.ts
 export interface LanguageOption {
   code: string;
   name: string;

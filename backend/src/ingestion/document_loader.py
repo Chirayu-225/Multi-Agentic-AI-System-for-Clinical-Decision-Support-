@@ -263,7 +263,7 @@ def load_document(pdf_path: str) -> dict:
         "has_hindi": has_hindi,
         "pages": num_pages,
         "filename": path.name,
-        # Mean OCR confidence in [0,1]; None for digital PDFs. main.py turns a low value
+        # Mean OCR confidence in [0,1]; None for digital PDFs. src/pipeline/upload.py turns a low value
         # into an ingestion warning so a clinician knows the numbers may be misread.
         "ocr_confidence": ocr_confidence,
     }

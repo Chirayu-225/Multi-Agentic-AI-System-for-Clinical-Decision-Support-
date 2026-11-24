@@ -1,4 +1,4 @@
-// src/app/services/error-message.ts
+// src/app/utils/error-message.ts
 // Turns an HttpErrorResponse (or anything thrown) into display text.
 // Backend errors are {detail: string}; 422s may carry detail as [{msg}].
 // The result is always rendered with {{ }} interpolation, never as markup.

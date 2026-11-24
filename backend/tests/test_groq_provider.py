@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-import src.llm as llm
+import src.core.llm as llm
 from pydantic import BaseModel
 
 

@@ -2,7 +2,8 @@
 polling endpoint, failures reported on the job (never a hung request), temp file cleaned up."""
 import os
 
-import main
+from tests.patching import patch_used
+from src.pipeline import upload as upload_pipeline
 from src.db.models import Report
 from src.db.session import SessionLocal
 
@@ -13,13 +14,13 @@ from tests.test_api_flow import (  # noqa: F401  (fresh_state is autouse; client
 
 def test_upload_returns_202_with_job_id_before_pipeline_runs(client, monkeypatch):
     seen = {}
-    real = main.run_orchestrator
+    real = upload_pipeline.run_orchestrator
 
     async def spy(*a, **k):
         seen["ran"] = True
         return await real(*a, **k)
 
-    monkeypatch.setattr(main, "run_orchestrator", spy)
+    patch_used(monkeypatch, "run_orchestrator", spy)
     h = login(client, CLIN)
     r = upload_raw(client, h, report_id="job-1")
     assert r.status_code == 202
@@ -45,7 +46,7 @@ def test_pipeline_failure_marks_job_failed_without_leaking_detail(client, monkey
     async def boom(*a, **k):
         raise RuntimeError("secret internal path C:\\x\\y")
 
-    monkeypatch.setattr(main, "run_orchestrator", boom)
+    patch_used(monkeypatch, "run_orchestrator", boom)
     h = login(client, CLIN)
     r = upload_raw(client, h, report_id="job-3")
     assert r.status_code == 202
@@ -58,20 +59,20 @@ def test_pipeline_failure_marks_job_failed_without_leaking_detail(client, monkey
 
 def test_temp_file_removed_after_success_and_after_failure(client, monkeypatch):
     paths = []
-    real_load = main.load_document
+    real_load = upload_pipeline.load_document
 
     def spy_load(path):
         paths.append(path)
         return real_load(path)
 
-    monkeypatch.setattr(main, "load_document", spy_load)
+    patch_used(monkeypatch, "load_document", spy_load)
     h = login(client, CLIN)
     upload(client, h, report_id="job-4")
 
     async def boom(*a, **k):
         raise RuntimeError("x")
 
-    monkeypatch.setattr(main, "run_orchestrator", boom)
+    patch_used(monkeypatch, "run_orchestrator", boom)
     upload(client, h, report_id="job-5")
     # The failing job is attempted several times (all from the same spooled file), so compare
     # distinct files: one per upload, and none may be left behind once the jobs are finished.
@@ -98,7 +99,7 @@ def test_failure_is_announced_over_websocket(client, monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("x")
 
-    monkeypatch.setattr(main, "run_orchestrator", boom)
+    patch_used(monkeypatch, "run_orchestrator", boom)
     h = login(client, CLIN)
     token = h["Authorization"].split()[1]
     with client.websocket_connect(f"/ws/job-7?token={token}") as ws:

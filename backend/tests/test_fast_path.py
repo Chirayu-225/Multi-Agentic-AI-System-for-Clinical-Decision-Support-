@@ -11,7 +11,9 @@ from datetime import timedelta
 
 import pytest
 
-import main
+from tests.patching import patch_used
+from src.pipeline.upload import save_preliminary
+from src.pipeline import upload as upload_pipeline
 from src.db.models import Report
 from src.db.session import SessionLocal
 from src.jobs import queue as jobq
@@ -67,13 +69,13 @@ def _make_due(report_id):
 
 def test_preliminary_report_exists_before_the_first_model_step(client, critical, monkeypatch):
     seen = {}
-    real = main.generate_summaries
+    real = upload_pipeline.generate_summaries
 
     async def spy(*a, **k):
         seen["row"] = _report("fp-1")           # the first model step is about to run
         return await real(*a, **k)
 
-    monkeypatch.setattr(main, "generate_summaries", spy)
+    patch_used(monkeypatch, "generate_summaries", spy)
     h = login(client, CLIN)
     assert upload(client, h, report_id="fp-1").status_code == 200
     assert seen["row"]["status"] == "preliminary" and seen["row"]["critical"] is True
@@ -92,7 +94,7 @@ def test_non_critical_report_is_flagged_as_such(client):
 # ── provider down: wait, keep the preliminary visible, do not burn attempts ───
 
 def test_provider_outage_defers_the_job_and_keeps_the_critical_result_visible(client, critical, monkeypatch):
-    monkeypatch.setattr(main, "llm_unavailable_for", lambda: 120.0)
+    patch_used(monkeypatch, "llm_unavailable_for", lambda: 120.0)
     h = login(client, CLIN)
     assert upload_raw(client, h, report_id="fp-3").status_code == 202
     _wait_for_stage("fp-3", "waiting_for_ai")
@@ -119,7 +121,7 @@ def test_provider_outage_defers_the_job_and_keeps_the_critical_result_visible(cl
 
 def test_job_completes_when_the_provider_recovers_and_the_report_becomes_approvable(client, critical, monkeypatch):
     state = {"down": True}
-    monkeypatch.setattr(main, "llm_unavailable_for", lambda: 60.0 if state["down"] else 0.0)
+    patch_used(monkeypatch, "llm_unavailable_for", lambda: 60.0 if state["down"] else 0.0)
     h = login(client, CLIN)
     upload_raw(client, h, report_id="fp-5")
     _wait_for_stage("fp-5", "waiting_for_ai")
@@ -136,7 +138,7 @@ def test_job_completes_when_the_provider_recovers_and_the_report_becomes_approva
 
 
 def test_waiting_has_a_limit_after_which_the_degraded_report_is_finished(client, monkeypatch):
-    monkeypatch.setattr(main, "llm_unavailable_for", lambda: 120.0)
+    patch_used(monkeypatch, "llm_unavailable_for", lambda: 120.0)
     monkeypatch.setenv("JOB_DEFER_MAX_SECONDS", "0")
     h = login(client, CLIN)
     assert upload(client, h, report_id="fp-6").status_code == 200
@@ -156,8 +158,8 @@ def test_critical_reports_are_listed_first_in_the_review_queue(client, monkeypat
 
 def test_a_second_attempt_does_not_duplicate_the_preliminary_row(critical):
     data = {"entities": {"lab_values": CRITICAL_LABS}, "rule_flags": [{"severity": "Severity.CRITICAL"}]}
-    assert main._save_preliminary("fp-7", "P001", "r.pdf", "2026-10-01", "digital", 1, "dr.rao", data) is True
-    assert main._save_preliminary("fp-7", "P001", "r.pdf", "2026-10-01", "digital", 1, "dr.rao", data) is False
+    assert save_preliminary("fp-7", "P001", "r.pdf", "2026-10-01", "digital", 1, "dr.rao", data) is True
+    assert save_preliminary("fp-7", "P001", "r.pdf", "2026-10-01", "digital", 1, "dr.rao", data) is False
     with SessionLocal() as db:
         assert db.query(Report).filter(Report.id == "fp-7").count() == 1
 

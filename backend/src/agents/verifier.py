@@ -10,7 +10,7 @@ Distinct from the Orchestrator in:
   - Authority: can reject and trigger correction of the orchestrator's output
   - System prompt: adversarial perspective, looking for unsupported claims
 
-Same pinned model (src/llm.py), different agent identity.
+Same pinned model (src/core/llm.py), different agent identity.
 
 Both summaries (clinical + patient) are audited in a SINGLE Gemini call, not two
 sequential ones. They used to run as separate calls with an artificial 5s sleep between
@@ -23,7 +23,7 @@ import re
 
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
-from src.llm import generate_text, is_rate_limit
+from src.core.llm import generate_text, is_rate_limit
 
 from src.security.deidentification import redact
 
@@ -342,7 +342,7 @@ async def verify_and_correct(
     placeholders (see summarizer.py / deidentification.py) — pass the SAME
     redaction_map used to produce them so the ground truth this function builds
     matches. This function does NOT rehydrate; the returned summaries still carry
-    placeholders. main.py rehydrates once, after this call.
+    placeholders. src/pipeline/upload.py rehydrates once, after this call.
 
     Returns:
         {

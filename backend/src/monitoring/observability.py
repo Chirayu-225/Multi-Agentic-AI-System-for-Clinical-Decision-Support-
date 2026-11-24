@@ -1,5 +1,5 @@
 """
-src/observability.py
+src/monitoring/observability.py
 
 The three things you need to operate the service, with no external dependencies:
 

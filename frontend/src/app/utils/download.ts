@@ -1,4 +1,4 @@
-// src/app/services/download.ts
+// src/app/utils/download.ts
 // Saves JSON to disk via a Blob + temporary <a download>; the object URL is
 // revoked straight away.
 export function downloadJson(filename: string, data: unknown): void {

@@ -176,7 +176,7 @@ def test_cli_refusal_exit_code(monkeypatch, capsys):
         raise gate.QuotaGuard("nope")
 
     monkeypatch.setattr(gate, "run_gate", refuse)
-    monkeypatch.setattr("src.llm.generate_text", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr("src.core.llm.generate_text", lambda *a, **k: None, raising=False)
     assert gate.main([]) == 2 and "REFUSED" in capsys.readouterr().out
 
 
@@ -202,7 +202,7 @@ def test_cli_exit_code_for_an_invalid_run(monkeypatch, capsys):
     async def fake_run_gate(**kw):
         return {"status": "invalid", "call_errors": 19, "calls_used": 20, "first_error": "AttributeError: x"}
     monkeypatch.setattr(gate, "run_gate", fake_run_gate)
-    import src.llm
+    import src.core.llm
     assert gate.main([]) == 3
     assert "INVALID RUN" in capsys.readouterr().out
 
@@ -223,11 +223,11 @@ def test_a_dead_provider_stops_the_run_after_a_few_failures_and_saves_quota(path
 
 
 def _serving(model, inner=None):
-    """A fake that reports which model answered, the way src.llm.with_fallback does."""
+    """A fake that reports which model answered, the way src.core.llm.with_fallback does."""
     inner = inner or make_generate()
 
     async def generate(prompt, **kw):
-        import src.llm as llm
+        import src.core.llm as llm
         llm.note_model(model)
         return await inner(prompt, **kw)
     return generate

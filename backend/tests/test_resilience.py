@@ -1,11 +1,11 @@
-"""Circuit breaker, rate limiter, and how src/llm.py uses them. A fake clock drives everything,
+"""Circuit breaker, rate limiter, and how src/core/llm.py uses them. A fake clock drives everything,
 so none of these tests sleeps."""
 import asyncio
 
 import pytest
 
-from src import llm
-from src.resilience import CLOSED, HALF_OPEN, OPEN, CircuitBreaker, CircuitOpen, RateLimiter
+from src.core import llm
+from src.core.resilience import CLOSED, HALF_OPEN, OPEN, CircuitBreaker, CircuitOpen, RateLimiter
 
 
 class Clock:

@@ -1,5 +1,5 @@
 """
-src/prompts.py
+src/agents/prompts.py
 
 Prompt versions. A version is a short hash of the prompt's own text, so it changes exactly when
 the prompt changes and nobody has to remember to bump a number. Every model call records the

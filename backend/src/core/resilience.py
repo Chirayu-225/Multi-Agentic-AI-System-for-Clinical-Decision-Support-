@@ -1,5 +1,5 @@
 """
-src/resilience.py
+src/core/resilience.py
 
 Two small primitives that keep an unhealthy model provider from taking the whole pipeline down
 with it. Both are plain, dependency-free and take an injectable clock so tests never sleep.

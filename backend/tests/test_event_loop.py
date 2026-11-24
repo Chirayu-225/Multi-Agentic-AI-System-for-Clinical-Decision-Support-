@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-import main
+from tests.patching import patch_used
 from src.tools import tool_registry
 from tests.test_api_flow import CLIN, client, fresh_state, login, upload  # noqa: F401
 
@@ -72,7 +72,7 @@ def test_upload_stores_history_and_scans_pdf_off_the_event_loop(client, monkeypa
         seen["scan_on_loop"] = in_event_loop()
         return []
 
-    monkeypatch.setattr(main, "chroma_store", fake_store)
-    monkeypatch.setattr(main, "detect_hidden_pdf_text", fake_scan)
+    patch_used(monkeypatch, "chroma_store", fake_store)
+    patch_used(monkeypatch, "detect_hidden_pdf_text", fake_scan)
     assert upload(client, login(client, CLIN)).status_code == 200
     assert seen == {"store_on_loop": False, "scan_on_loop": False}

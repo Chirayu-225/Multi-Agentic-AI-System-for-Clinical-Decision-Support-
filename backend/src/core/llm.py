@@ -1,5 +1,5 @@
 """
-src/llm.py
+src/core/llm.py
 
 The ONE place this project talks to a model provider: Gemini (google-genai) or Groq (its
 OpenAI-compatible HTTP API). LLM_PROVIDER picks one; with no setting, Groq is used when
@@ -43,8 +43,8 @@ from typing import Any, NamedTuple
 
 import time
 
-from src import observability as obs
-from src.resilience import CircuitBreaker, CircuitOpen, RateLimiter
+from src.monitoring import observability as obs
+from src.core.resilience import CircuitBreaker, CircuitOpen, RateLimiter
 
 logger = logging.getLogger("medsight")
 
@@ -83,7 +83,7 @@ _groq_transport = None          # tests inject an httpx.MockTransport here; None
 def required_key_name() -> str:
     return "GROQ_API_KEY" if PROVIDER == "groq" else "GEMINI_API_KEY"
 
-# Provider-health protection (see src/resilience.py). One breaker per model, because the fallback
+# Provider-health protection (see src/core/resilience.py). One breaker per model, because the fallback
 # model exists precisely for when the main one is overloaded; one rate limiter for the whole
 # process, because the quota belongs to the API key, not to a model.
 BREAKER_THRESHOLD = int(os.getenv("LLM_BREAKER_FAILURES", "5"))

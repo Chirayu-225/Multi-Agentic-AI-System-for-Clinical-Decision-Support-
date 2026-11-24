@@ -10,7 +10,7 @@ eval/frozen_gate.py - a small, frozen, on-demand check for prompt and model chan
 Why it is shaped this way (free-tier quota, no paid services):
   * FROZEN: the cases live in a committed file, so two runs compare the same inputs.
   * SMALL: 8 cases -> about 16 verifier calls + 4 summarizer calls. A full gate is ~20 calls.
-  * TARGETED: each component's prompt has a version (src/prompts.py). The baseline records the
+  * TARGETED: each component's prompt has a version (src/agents/prompts.py). The baseline records the
     versions and the model it was measured with; only components whose prompt version changed (or
     everything, if the model changed) are re-run. Editing the summarizer does not spend the
     verifier's calls.
@@ -126,7 +126,8 @@ def load_frozen(path: Path = FROZEN_PATH) -> dict:
 # ── planning ───────────────────────────────────────────────────────────────────
 
 def current_state() -> dict:
-    from src import llm, prompts
+    from src.core import llm
+    from src.agents import prompts
     return {"prompt_versions": prompts.current_versions(), "model": llm.MODEL}
 
 
@@ -194,7 +195,7 @@ class CallCounter:
                 self.exhausted = True
                 raise RuntimeError("gate call cap reached")      # absorbed by the agent; check() aborts
             self.used += 1
-            from src import llm
+            from src.core import llm
             answered = llm.begin_model_tracking()   # filled by with_fallback with the model that replied
             try:
                 out = await generate(*a, **k)
@@ -388,7 +389,7 @@ def main(argv=None) -> int:
         return 0
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
-    from src.llm import generate_text
+    from src.core.llm import generate_text
     try:
         report = asyncio.run(run_gate(generate=generate_text, force_all=args.all, dry_run=args.dry_run,
                                       update_baseline=args.update_baseline))

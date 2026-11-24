@@ -1,5 +1,5 @@
 """
-src/features.py
+src/core/features.py
 
 Optional features, OFF by default. The core product is: a clinician reviews what changed in a
 patient's labs, verified and in their language. These two are not part of that loop:

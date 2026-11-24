@@ -1,238 +1,178 @@
-# Agentic Medical Assistant
+# Med2: Agentic Medical Assistant
 
-**For GPs in Indian clinics: see what changed in a patient's labs since the last visit —
-checked against the right reference range, verified, and explained in the patient's
-language — in under a minute.**
+An AI assistant for GPs in Indian clinics. A doctor uploads a patient's lab report (PDF or phone photo). Within about a minute the system shows which values are abnormal, what changed since the last visit, and a plain-language summary the patient can read in their own language. **A clinician must review and approve everything before the patient sees it.**
 
-A multi-agent AI system that reads lab reports (PDFs or phone photos), flags values against
-ICMR ranges chosen for the patient's age and sex, tracks each patient across visits, and
-writes AI-verified summaries that a clinician reviews, edits and approves before release.
+> This tool assists a clinician's review. It is not a diagnosis and not a substitute for professional medical judgment. Every AI-generated summary carries this disclaimer in the API response and in the UI.
 
-> **This tool assists a clinician's review — it is not a diagnosis and not a substitute
-> for professional medical judgment.** Every AI-generated summary carries this disclaimer
-> end-to-end (API response + UI banner). See [Safety & security](#safety--security) below
-> for what this project does and does not protect against.
-
-## Architecture
-
-| Layer          | Tech                                          |
-|----------------|------------------------------------------------|
-| Frontend       | Angular + TypeScript + TailwindCSS              |
-| Backend        | FastAPI + SQLAlchemy                            |
-| Database       | PostgreSQL (SQLite supported for local dev)     |
-| Vector store   | ChromaDB                                        |
-| Model          | Google Gemini 3.8 Flash via the `google-genai` SDK, pinned by `GEMINI_MODEL` and recorded on every run |
-| Agents         | Orchestrator (ReAct + tool calling), Verifier (structured audit + correction, fails CLOSED) |
-| Local tools    | GLiNER NER, EasyOCR (scans/photos), ICMR rule engine, drug-interaction rules, 4-tier longitudinal intelligence |
-| External tools | OpenFDA API; PubMed API (optional, `ENABLE_PUBMED`) |
-| Security       | JWT accounts with roles, clinician approval gate, hash-chained audit log, prompt-injection detection, de-identification, numeric grounding, rate limiting |
-| Infra          | Docker Compose + Nginx                          |
+---
 
 ## How it works
 
-1. A clinician signs in and uploads a PDF report **or a photo/scan** (JPG, PNG, WebP) with a
-   pseudonymous patient ID and report date. Scans go through local OCR with a confidence
-   check; hidden text in PDFs is detected.
-2. The **Orchestrator** runs entity extraction (GLiNER), ICMR risk-flagging,
-   trend/baseline detection and a deterministic **drug-interaction check** as a plain
-   pipeline, no LLM call. Sex and age are normalised (`F`, `32Y/F`, `54 Years / Male`...)
-   so the right ICMR range is used, and the lab's own printed range is read and compared.
-   Gemini is only asked to choose among the conditional tools (semantic history recall,
-   OpenFDA, and PubMed when enabled). Patient identifiers are redacted before any
-   prompt is built and restored once, server-side, at the end.
-3. The **Summarizer** writes the clinical and patient summaries, the **Verifier** audits
-   both in one call (and fails closed), and a deterministic **numeric grounding** check
-   flags any number not found in the extracted data. Every extracted fact is linked back
-   to its source line (**evidence panel**).
-4. The report is saved as **pending review**. From the review queue a clinician can edit
-   either summary (the AI's original is kept), must explicitly acknowledge any warning
-   (unverified summary, ungrounded number, injection signal, extraction problem, range
-   disagreement) before approving, or rejects it with a reason. Only approved reports are
-   visible to the patient. Each decision is written to a tamper-evident audit log, and a
-   rejected report is removed from the patient's history so it never shapes a trend.
-5. Optional: translate the patient summary (Hindi, Kannada, Tamil, Telugu, Marathi,
-   Bengali; numbers are machine-checked against the English text), chart lab trends over
-   time, and export a FHIR R4 Bundle.
+Think of a junior doctor (the AI), a strict checker (a second AI plus plain code) and a senior doctor (the human) who signs off.
 
-## Longitudinal intelligence (4 tiers)
+1. **Upload.** A clinician signs in and uploads a PDF or a photo with a pseudonymous patient ID and report date. The API validates the file, answers `202`, and queues a background job.
+2. **Read.** Text is extracted from the PDF. Scans and photos go through local OCR (EasyOCR). Hidden text in PDFs is detected.
+3. **Extract and flag (no LLM).** GLiNER pulls out the lab values. Plain code compares each one with the **ICMR reference ranges** for the patient's age and sex, checks drug interactions, and compares against the patient's own history. These are the safety-critical steps, so they are deterministic and testable.
+4. **Orchestrate.** An LLM agent decides which optional tools to call: semantic recall of past reports (ChromaDB), OpenFDA, PubMed.
+5. **Summarise.** One agent writes a clinical summary and a patient summary.
+6. **Verify.** A verifier agent audits both summaries and **fails closed**: if verification breaks, the summary is marked unverified instead of passing. A separate code check flags any number in a summary that is not in the extracted data. Every fact links back to its source line (evidence panel).
+7. **Review.** The report waits in a review queue. The clinician can edit (the AI original is kept), must acknowledge every warning, then approves or rejects with a reason. Each decision is written to a tamper-evident audit log.
+8. **Release.** Only approved reports are visible to the patient. The patient summary can be translated (Hindi, Kannada, Tamil, Telugu, Marathi, Bengali) with the numbers machine-checked, charted over time, or exported as a FHIR R4 bundle.
 
-Beyond a single report, the system tracks a patient across visits at increasing depth:
+**The design rule:** the LLM only does what needs language (summarising, choosing tools). Anything that could hurt a patient if wrong (range checks, interactions, number checks, access control, approval) is plain code, with a human at the end.
 
-1. **Trajectory narrative** — an LLM-written paragraph tracing the patient's trend across
-   visits, grounded only in the actual flagged values.
-2. **Personal-baseline deviation** — flags a value that has drifted meaningfully from
-   *this patient's own* historical mean (z-score + minimum % change gate), even while
-   still inside the general population's normal range. Requires ≥3 prior visits.
-3. **Slope-based forecasting** *(off by default, `ENABLE_FORECASTING=true`)* — an
-   illustrative linear projection of when a monotonically-trending value would cross its
-   next threshold. A fit over a handful of visits shown to a clinician reads as a
-   prediction it can't support, so it is hidden from the product; when enabled it is
-   capped at MODERATE and excluded from the top-level risk score.
-4. **Semantic history recall** — searches the patient's past report *text* (not just lab
-   values) for episodes similar in meaning to the current findings, via the ChromaDB
-   embeddings already computed on every upload.
+### Longitudinal intelligence
 
-## Safety & security
+Beyond one report, the system tracks a patient across visits: a trajectory narrative, deviation from the patient's *own* baseline (needs 3+ prior visits), semantic recall of similar past episodes, and an optional slope forecast (off by default, `ENABLE_FORECASTING`).
 
-Full threat model, OWASP LLM Top 10 (2026) mapping, measured results and known gaps are in
-[SECURITY.md](SECURITY.md). In short:
+---
 
-- **Named accounts and roles** (clinician / patient / service), scrypt passwords, lockout,
-  JWT with pinned algorithm, object-level authorisation (patients only ever see their own
-  approved reports).
-- **Human-in-the-loop release gate**: nothing reaches a patient until a clinician approves;
-  warnings must be acknowledged, edits keep the AI original, and `/admin/metrics` reports
-  approve-without-edit rate and time-to-review so rubber-stamping is visible.
-- **Erasure that is real**: deleting a patient clears the vector store too (and refuses to
-  report success if it can't); only redacted text, never filenames, is embedded.
-- **Hash-chained audit log** (no PHI) with an integrity check and a dashboard.
-- **Layered misinformation defence**: fail-closed Verifier, deterministic numeric grounding,
-  evidence linking, curated drug-interaction rules.
-- **Prompt-injection defence**: normalisation, pattern detection, hidden-PDF-text detection,
-  untrusted-text delimiting, output scanning. Detected and surfaced, not silently blocked.
-- **De-identification before every model call**, local-only OCR, translation validated
-  deterministically, model text rendered without `innerHTML` (enforced in CI).
-- **Measured, not claimed**: `cd backend && python -m eval.run_eval` runs a 200-report
-  synthetic evaluation and writes [EVAL_RESULTS.md](EVAL_RESULTS.md); CI fails if it
-  regresses. The results include the weaknesses (for example a 14% name leak when the NER
-  misses, and 0% detection of value swaps by the numeric check). Synthetic data only proves
-  the logic; `python -m eval.run_gold` scores the same pipeline on **real, de-identified
-  reports** you collect (see the module docstring — the gold set is git-ignored).
-- **No PHI in logs or version control.**
+## Project layout
 
-## Tests and CI
-
-```bash
-cd backend
-pip install -r requirements-dev.txt
-python -m pytest -q                # no API key or GPU needed
-python -m eval.run_eval --check    # synthetic evaluation with regression thresholds
-python -m eval.run_eval --live     # also measures the real Verifier (needs GEMINI_API_KEY)
-python -m eval.run_gold --check    # real-report gold set (needs eval/gold/labels.json)
+```
+Med2/
+├─ README.md                  this file (the only README)
+├─ CLAUDE.md                  guidance for Claude Code working in this repo
+├─ docker-compose.yml         backend + frontend (nginx) + PostgreSQL
+├─ docs/                      DESIGN, SAFETY (hazard log), SECURITY (threat model), EVAL_RESULTS
+├─ samples/                   example lab reports for trying the upload (git-ignored)
+├─ .github/workflows/         CI: tests, eval gate, bandit, pip-audit, npm audit, gitleaks
+│
+├─ backend/
+│  ├─ main.py                 entry point: loads .env, builds the app (about 25 lines)
+│  ├─ requirements*.txt, Dockerfile, .env.example
+│  ├─ eval/                   measured-results harness (synthetic data, regression gate, gold set)
+│  ├─ scripts/                provider checks, queue benchmark, run tests on PostgreSQL
+│  ├─ tests/                  about 570 tests; heavy ML libraries and LLMs are stubbed
+│  └─ src/
+│     ├─ api/                 the HTTP layer
+│     │  ├─ app.py            builds the FastAPI app, startup and shutdown
+│     │  ├─ routes/           one file per area: health, auth, accounts, uploads,
+│     │  │                    reviews, reports, patients, admin
+│     │  ├─ schemas.py        request bodies          views.py   response shaping
+│     │  ├─ deps.py           shared request helpers  middleware.py  CORS, headers, request ids
+│     │  └─ auth.py           JWT, roles, token revocation
+│     ├─ pipeline/            what happens after an upload
+│     │  ├─ upload.py         the background job: the whole analysis, step by step
+│     │  ├─ progress.py       live progress over WebSocket
+│     │  ├─ history_sync.py   keeps ChromaDB in step with the database (outbox)
+│     │  └─ workers.py        starts and stops the job worker and outbox relay
+│     ├─ agents/              orchestrator, summarizer, verifier, translator, prompts
+│     ├─ ingestion/           PDF text, OCR, hidden-text detection
+│     ├─ ner/                 GLiNER entity extraction
+│     ├─ flagging/            ICMR rule engine, age/sex range selection, trends
+│     ├─ evidence/            numeric grounding and fact-to-source linking
+│     ├─ tools/               agent tools: drug interactions, history store, PubMed/OpenFDA
+│     ├─ security/            guardrails, de-identification, passwords, audit chain, rate limit
+│     ├─ jobs/                database-backed job queue, worker, history outbox
+│     ├─ db/                  SQLAlchemy models and session
+│     ├─ core/                the single LLM client, resilience (breaker, rate limit), feature flags, config
+│     ├─ monitoring/          logging and metrics, AI-quality tracking
+│     ├─ interop/             FHIR R4 export
+│     └─ export/              review-queue PDF
+│
+└─ frontend/                  Angular 18 + Tailwind
+   └─ src/app/
+      ├─ components/          auth, dashboard, report, review, history, portal, accounts, shared
+      ├─ services/            API client, auth, interceptor, review state, severity
+      ├─ models/              TypeScript types for API data
+      └─ utils/               small helpers: error messages, downloads, languages
 ```
 
-Heavy ML libraries and Gemini are stubbed in tests; the real routing, auth, database,
-flagging, interaction and grounding code runs. GitHub Actions
-(`.github/workflows/security.yml`) runs tests, the eval gate, bandit, pip-audit, npm audit,
-gitleaks and a production frontend build on every push and weekly.
+**Where to start reading:** `backend/src/pipeline/upload.py` is the story of one report from upload to review queue. `backend/src/api/routes/` shows what the API offers.
 
-## Prerequisites
+---
 
-- Python 3.11+
-- Node.js 20+
-- A Gemini API key ([aistudio.google.com](https://aistudio.google.com/) → Get API Key)
+## Tech stack
 
-## Local setup
+| Layer | Technology |
+|---|---|
+| Frontend | Angular 18, TypeScript, TailwindCSS |
+| Backend | FastAPI, SQLAlchemy |
+| Database | PostgreSQL (SQLite for local dev) |
+| Vector store | ChromaDB |
+| LLM | Groq (`openai/gpt-oss-120b`, free tier) or Google Gemini, chosen by `LLM_PROVIDER`; one pinned model recorded on every run |
+| Local ML | GLiNER (entities), EasyOCR (scans), deterministic ICMR rules |
+| External tools | OpenFDA, PubMed (optional) |
+| Infra | Docker Compose, Nginx |
 
-### 1. Configure environment
+---
 
-```bash
-cp backend/.env.example backend/.env      # macOS/Linux
-copy backend\.env.example backend\.env    # Windows
+## Run it locally (Windows Command Prompt)
+
+You need Python 3.11+, Node.js 20+, and a Groq or Gemini API key.
+
+**1. Configure**
+
+```cmd
+copy backend\.env.example backend\.env
 ```
 
-Edit `backend/.env` and set:
-- `GEMINI_API_KEY` — from [aistudio.google.com](https://aistudio.google.com/) (Get API Key)
-- `GEMINI_MODEL` — defaults to `gemini-3.8-flash`. `gemini-2.5-flash` only works for API
-  keys that have used it before, so new keys need a current model
-- `JWT_SECRET` — 32+ random characters: `python -c "import secrets; print(secrets.token_urlsafe(48))"`
-- `BOOTSTRAP_CLINICIAN_USERNAME` / `BOOTSTRAP_CLINICIAN_PASSWORD` (10+ characters) — your
-  first account, created at startup. Optionally also `BOOTSTRAP_PATIENT_USERNAME`,
-  `BOOTSTRAP_PATIENT_PASSWORD` and `BOOTSTRAP_PATIENT_PATIENT_ID` for a patient-portal demo.
+Edit `backend\.env` and set at least:
+- `GROQ_API_KEY` (or `GEMINI_API_KEY` with `LLM_PROVIDER=gemini`)
+- `JWT_SECRET`, 32+ random characters
+- `BOOTSTRAP_CLINICIAN_USERNAME` and `BOOTSTRAP_CLINICIAN_PASSWORD` (10+ characters), your first account
 
-Then sign in with that account on the login screen. To give a patient access, open
-**Accounts** in the sidebar: pick the patient, choose a username, and hand them the one-time
-temporary password; they must set their own at first sign-in. **Reset password** issues a new
-temporary one.
+**2. Backend**
 
-### 2. Backend
-
-```bash
+```cmd
 cd backend
 python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
-
+venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8001
 ```
 
-Backend runs at `http://localhost:8000` (Swagger docs at `/docs`).
+API on `http://localhost:8001`, Swagger docs at `/docs`.
 
-### 3. Frontend
+**3. Frontend** (in a second window, backend first)
 
-```bash
+```cmd
 cd frontend
 npm install
 npm start
 ```
 
-Frontend runs at `http://localhost:4200`.
+App on `http://localhost:4200`. Sign in with the bootstrap account. To give a patient access, open **Accounts**, pick the patient, and hand over the one-time temporary password; they must change it at first sign-in.
 
-**Start the backend first** — the frontend expects it to be up on `:8000`.
+**Docker** (from the repo root): put `GROQ_API_KEY` (or `GEMINI_API_KEY`), `JWT_SECRET`, `POSTGRES_PASSWORD` and the bootstrap clinician variables in a root `.env`, then run `docker-compose up --build`. The app is served at `http://localhost`, with Nginx proxying the API and WebSocket.
 
-## Docker deployment
+### Main settings (full list in `backend/.env.example`)
 
-```bash
-docker-compose up --build
+| Variable | Purpose |
+|---|---|
+| `LLM_PROVIDER`, `GROQ_API_KEY`, `GEMINI_API_KEY` | which model provider and its key |
+| `JWT_SECRET` | signs login tokens (required) |
+| `BOOTSTRAP_CLINICIAN_*` | creates the first clinician account |
+| `REQUIRE_CLINICIAN_REVIEW` | default `true`; `false` skips approval (demo only) |
+| `DATABASE_URL` | defaults to local SQLite; Docker uses PostgreSQL |
+| `ENABLE_FORECASTING`, `ENABLE_PUBMED` | optional features, off by default |
+| `JOB_WORKERS`, `LLM_RPM`, `LLM_MAX_CALLS_PER_REPORT` | background capacity and LLM cost controls |
+
+---
+
+## Tests and evaluation
+
+```cmd
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest -q
+python -m eval.run_eval --check
 ```
 
-Run this from the **repository root** (the compose file lives at the root, not inside
-`backend/`). It builds and runs the backend, frontend (served via Nginx, which also
-proxies API and WebSocket traffic to the backend), and a PostgreSQL database.
+The test suite needs no API key and no GPU. The eval harness scores 200 synthetic reports against thresholds and rewrites `docs/EVAL_RESULTS.md`; CI fails if the results regress. `python -m eval.run_gold --check` does the same on real de-identified reports you collect yourself (git-ignored).
 
-`docker-compose.yml` requires `GEMINI_API_KEY`, `JWT_SECRET` and
-`POSTGRES_PASSWORD` (no insecure defaults) — put them in a `.env` file at the repository root:
+---
 
-```bash
-# .env at repo root (used by docker-compose, separate from backend/.env)
-GEMINI_API_KEY=your-key-here
-JWT_SECRET=at-least-32-random-characters
-POSTGRES_PASSWORD=some-strong-password
-BOOTSTRAP_CLINICIAN_USERNAME=dr.example
-BOOTSTRAP_CLINICIAN_PASSWORD=a-strong-passphrase
-```
+## Safety and security in short
 
-Users sign in with a username and password, so no secret is baked into the frontend
-bundle. Nginx proxies `/auth`, `/report`, `/reviews`, `/me`, `/patient(s)`, `/admin`,
-`/health` and the WebSocket to the backend. Put TLS in front of it for anything beyond a demo.
+- **Human approval gate.** Nothing reaches a patient before a clinician approves; warnings must be acknowledged; edits keep the AI original.
+- **Fail-closed verification** plus deterministic number grounding and curated drug-interaction rules.
+- **De-identification before every model call.** Names and IDs are removed from prompts and restored only on the server. OCR is local only.
+- **Prompt-injection defence:** text normalisation, pattern detection, hidden-PDF-text detection, output scanning.
+- **Accounts and roles** (clinician, patient, service), scrypt passwords, lockout, revocable JWTs, per-patient access checks.
+- **Tamper-evident audit log** (hash chain, no patient data) and **real erasure** that also clears the vector store.
+- **Reliability:** a database-backed job queue, circuit breaker and shared rate limit for the LLM, an outbox for the vector store.
+- **Measured, including the weak spots.** `docs/SECURITY.md` has the threat model and known gaps; `docs/SAFETY.md` lists each hazard with the test that proves its control.
 
-- Frontend: http://localhost:80
-- Backend API: http://localhost:8000
-- Swagger docs: http://localhost:8000/docs
-
-## Environment variables
-
-See `backend/.env.example` for the full list and inline documentation. Key ones:
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `GEMINI_API_KEY` | yes | Gemini API access |
-| `JWT_SECRET` | yes (32+ chars) | Signs login tokens; unset = random per-process secret |
-| `BOOTSTRAP_CLINICIAN_USERNAME` / `_PASSWORD` | first run | Creates the first clinician account |
-| `REQUIRE_CLINICIAN_REVIEW` | no | default `true`; `false` auto-approves (demo only) |
-| `ACCESS_TOKEN_MINUTES` | no | default 60 |
-| `AUDIT_ENABLED` | no | default `true` |
-| `OCR_GPU` | no | `auto` / `true` / `false` |
-| `GEMINI_MODEL` | no | defaults to `gemini-3.8-flash`; one model for every agent |
-| `ENABLE_FORECASTING` | no | default `false`; slope-based projections |
-| `ENABLE_PUBMED` | no | default `false`; literature links for HIGH/CRITICAL findings |
-| `DATABASE_URL` | no | defaults to local SQLite; Docker Compose overrides to Postgres |
-| `CORS_ORIGINS` | no | comma-separated allowed origins |
-| `UPLOAD_RATE_LIMIT_MAX` / `UPLOAD_RATE_LIMIT_WINDOW_SECONDS` | no | defaults 10 / 600 |
-| `LOG_LEVEL` | no | defaults `INFO` |
-
-## Notes
-
-- Free-tier Gemini quotas apply to the model-calling agents (and translation); heavy concurrent use may hit rate
-  limits (both `summarizer.py` and `verifier.py` retry with backoff; `orchestrator.py`'s
-  ReAct-loop calls retry too).
-- PubMed and OpenFDA APIs are used without an API key (both support this for
-  reasonable request volumes).
-- Long reports are truncated (report text at ~20k characters, entity extraction at 20
-  chunks) with the truncation surfaced as an `ingestion_warnings` entry in the API
-  response and a banner in the UI — not silent.
-
-## Output Snippet
-
-<img width="1919" height="907" alt="image" src="https://github.com/user-attachments/assets/3397caf5-3801-420f-b40e-a55a9f9d9bbe" />
+Deeper reading: `docs/DESIGN.md` (why it is built this way), `docs/SAFETY.md`, `docs/SECURITY.md`, `docs/EVAL_RESULTS.md`.
